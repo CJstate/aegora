@@ -361,6 +361,22 @@ func TestLoad_SampleDevConfig(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Routes[0].Methods, []string{"GET", "POST"}) {
 		t.Errorf("expected route 0 methods [GET POST], got %v", cfg.Routes[0].Methods)
 	}
+
+	if !cfg.RateLimit.Enabled {
+		t.Errorf("expected rate_limit.enabled = true")
+	}
+	if cfg.RateLimit.Limiter != "sliding_window" {
+		t.Errorf("expected rate_limit.limiter = sliding_window, got %s", cfg.RateLimit.Limiter)
+	}
+	if cfg.RateLimit.MaxRequests != 60 {
+		t.Errorf("expected rate_limit.max_requests = 60, got %d", cfg.RateLimit.MaxRequests)
+	}
+	if cfg.RateLimit.Window.Duration() != time.Minute {
+		t.Errorf("expected rate_limit.window = 1m, got %s", cfg.RateLimit.Window)
+	}
+	if cfg.RateLimit.Key != "ip" {
+		t.Errorf("expected rate_limit.key = ip, got %s", cfg.RateLimit.Key)
+	}
 }
 
 func TestValidate_ExtendedRouteFields(t *testing.T) {
@@ -372,5 +388,136 @@ func TestValidate_ExtendedRouteFields(t *testing.T) {
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected valid configuration with extended fields, got: %v", err)
+	}
+}
+
+func TestValidate_RateLimit(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(*config.Config)
+		wantErrText string
+	}{
+		{
+			name: "valid sliding_window rate_limit",
+			mutate: func(c *config.Config) {
+				c.RateLimit = config.RateLimitConfig{
+					Enabled:     true,
+					Limiter:     "sliding_window",
+					MaxRequests: 100,
+					Window:      config.Duration(time.Minute),
+					Key:         "ip",
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "valid token_bucket rate_limit",
+			mutate: func(c *config.Config) {
+				c.RateLimit = config.RateLimitConfig{
+					Enabled:         true,
+					Limiter:         "token_bucket",
+					MaxRequests:     50,
+					RefillPerSecond: 2.5,
+					Key:             "api_key",
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "disabled rate_limit ignores missing fields",
+			mutate: func(c *config.Config) {
+				c.RateLimit = config.RateLimitConfig{
+					Enabled: false,
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "max_requests non-positive",
+			mutate: func(c *config.Config) {
+				c.RateLimit = config.RateLimitConfig{
+					Enabled:     true,
+					Limiter:     "sliding_window",
+					MaxRequests: 0,
+					Window:      config.Duration(time.Minute),
+					Key:         "ip",
+				}
+			},
+			wantErrText: "rate_limit.max_requests",
+		},
+		{
+			name: "invalid limiter type",
+			mutate: func(c *config.Config) {
+				c.RateLimit = config.RateLimitConfig{
+					Enabled:     true,
+					Limiter:     "leaky_bucket",
+					MaxRequests: 10,
+					Window:      config.Duration(time.Minute),
+					Key:         "ip",
+				}
+			},
+			wantErrText: "rate_limit.limiter",
+		},
+		{
+			name: "invalid key type",
+			mutate: func(c *config.Config) {
+				c.RateLimit = config.RateLimitConfig{
+					Enabled:     true,
+					Limiter:     "sliding_window",
+					MaxRequests: 10,
+					Window:      config.Duration(time.Minute),
+					Key:         "session_id",
+				}
+			},
+			wantErrText: "rate_limit.key",
+		},
+		{
+			name: "sliding_window missing or non-positive window",
+			mutate: func(c *config.Config) {
+				c.RateLimit = config.RateLimitConfig{
+					Enabled:     true,
+					Limiter:     "sliding_window",
+					MaxRequests: 10,
+					Window:      0,
+					Key:         "ip",
+				}
+			},
+			wantErrText: "rate_limit.window",
+		},
+		{
+			name: "token_bucket missing or non-positive refill rate",
+			mutate: func(c *config.Config) {
+				c.RateLimit = config.RateLimitConfig{
+					Enabled:         true,
+					Limiter:         "token_bucket",
+					MaxRequests:     10,
+					RefillPerSecond: 0,
+					Key:             "api_key",
+				}
+			},
+			wantErrText: "rate_limit.refill_per_second",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := parseValidFixture(t)
+			tt.mutate(cfg)
+
+			err := cfg.Validate()
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("expected valid configuration, got: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErrText)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("expected error to contain %q, got: %v", tt.wantErrText, err)
+			}
+		})
 	}
 }
