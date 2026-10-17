@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -61,10 +62,14 @@ type ServerConfig struct {
 
 // RouteConfig specifies upstream routing rules and target destinations.
 type RouteConfig struct {
-	Name        string   `yaml:"name"`
-	PathPrefix  string   `yaml:"path_prefix"`
-	Targets     []string `yaml:"targets"`
-	StripPrefix string   `yaml:"strip_prefix"`
+	Name        string            `yaml:"name"`
+	PathPrefix  string            `yaml:"path_prefix"`
+	PathRegex   string            `yaml:"path_regex,omitempty"`
+	Methods     []string          `yaml:"methods,omitempty"`
+	Headers     map[string]string `yaml:"headers,omitempty"`
+	Targets     []string          `yaml:"targets"`
+	StripPrefix string            `yaml:"strip_prefix,omitempty"`
+	LB          string            `yaml:"lb,omitempty"`
 }
 
 // ObservabilityConfig contains telemetry and logging configuration.
@@ -167,7 +172,9 @@ func (c *Config) Validate() error {
 	}
 
 	seenNames := make(map[string]struct{}, len(c.Routes))
-	for i, route := range c.Routes {
+	for i := range c.Routes {
+		route := &c.Routes[i]
+
 		if strings.TrimSpace(route.Name) == "" {
 			return fmt.Errorf("config: routes[%d].name: cannot be empty", i)
 		}
@@ -190,6 +197,18 @@ func (c *Config) Validate() error {
 
 		if route.StripPrefix != "" && !strings.HasPrefix(route.StripPrefix, "/") {
 			return fmt.Errorf("config: routes[%d].strip_prefix: must start with %q, got %q", i, "/", route.StripPrefix)
+		}
+
+		if route.PathRegex != "" {
+			if _, err := regexp.Compile(route.PathRegex); err != nil {
+				return fmt.Errorf("config: routes[%d].path_regex: invalid regex %q: %w", i, route.PathRegex, err)
+			}
+		}
+
+		if route.LB == "" {
+			route.LB = "round_robin"
+		} else if route.LB != "round_robin" && route.LB != "least_connections" {
+			return fmt.Errorf("config: routes[%d].lb: must be one of round_robin, least_connections; got %q", i, route.LB)
 		}
 	}
 
