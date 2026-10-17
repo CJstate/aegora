@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/syncronix-labs/aegora/internal/config"
 )
 
@@ -746,4 +748,78 @@ func TestBuildHandler_TieredCache_UnreachableDegrades(t *testing.T) {
 		t.Fatalf("expected X-Cache HIT on L1 cache, got %q", rec2.Header().Get("X-Cache"))
 	}
 }
+
+func TestBuildHandler_PrometheusMetrics(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"metric":true}`))
+	}))
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:         "127.0.0.1:8080",
+			ReadTimeout:  config.Duration(15 * time.Second),
+			WriteTimeout: config.Duration(15 * time.Second),
+			IdleTimeout:  config.Duration(30 * time.Second),
+		},
+		Routes: []config.RouteConfig{
+			{
+				Name:       "metrics-test-route",
+				PathPrefix: "/api",
+				Targets:    []string{backend.URL},
+			},
+		},
+		Observability: config.ObservabilityConfig{
+			LogLevel:    "info",
+			MetricsAddr: "127.0.0.1:9090",
+		},
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	reg := prometheus.NewRegistry()
+	handler, err := buildHandlerWithRegistry(cfg, logger, reg)
+	if err != nil {
+		t.Fatalf("buildHandlerWithRegistry: %v", err)
+	}
+
+	// Make request to matching route
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	// Make request to unmatched route (404)
+	rec404 := httptest.NewRecorder()
+	req404 := httptest.NewRequest(http.MethodGet, "/unmatched-path", nil)
+	handler.ServeHTTP(rec404, req404)
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec404.Code)
+	}
+
+	// Verify /metrics endpoint output using promhttp.HandlerFor
+	metricsHandler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
+	metricsRec := httptest.NewRecorder()
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsHandler.ServeHTTP(metricsRec, metricsReq)
+
+	if metricsRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /metrics, got %d", metricsRec.Code)
+	}
+
+	metricsOutput := metricsRec.Body.String()
+	if !strings.Contains(metricsOutput, `aegora_requests_total{code="200",method="GET",route="metrics-test-route"} 1`) {
+		t.Errorf("expected metrics to contain matching route 200 count, got:\n%s", metricsOutput)
+	}
+	if !strings.Contains(metricsOutput, `aegora_requests_total{code="404",method="GET",route="unmatched"} 1`) {
+		t.Errorf("expected metrics to contain unmatched route 404 count, got:\n%s", metricsOutput)
+	}
+	if !strings.Contains(metricsOutput, `aegora_request_duration_seconds_count{method="GET",route="metrics-test-route"} 1`) {
+		t.Errorf("expected duration seconds count in metrics output, got:\n%s", metricsOutput)
+	}
+}
+
 

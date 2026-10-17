@@ -151,6 +151,14 @@ func NewGateway(routes []RouteConfig, rc ReliabilityConfig) (*Gateway, error) {
 	}, nil
 }
 
+// Router returns the underlying Router instance used by the gateway for route matching.
+func (g *Gateway) Router() *Router {
+	if g == nil {
+		return nil
+	}
+	return g.router
+}
+
 // ServeHTTP matches incoming requests against configured routes, strips prefixes,
 // selects an upstream target, and proxies the request.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, req *http.Request) {

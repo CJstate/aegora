@@ -282,6 +282,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: observability.log_level: must be one of debug, info, warn, error; got %q", c.Observability.LogLevel)
 	}
 
+	if c.Observability.MetricsAddr != "" {
+		if _, err := net.ResolveTCPAddr("tcp", c.Observability.MetricsAddr); err != nil {
+			return fmt.Errorf("config: observability.metrics_addr: invalid address %q: %w", c.Observability.MetricsAddr, err)
+		}
+	}
+
 	if c.RateLimit.Enabled {
 		if c.RateLimit.MaxRequests <= 0 {
 			return fmt.Errorf("config: rate_limit.max_requests: must be positive, got %d", c.RateLimit.MaxRequests)
