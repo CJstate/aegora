@@ -393,6 +393,28 @@ func TestLoad_SampleDevConfig(t *testing.T) {
 	if cfg.Reliability.RetryInitialDelay.Duration() != 100*time.Millisecond {
 		t.Errorf("expected retry_initial_delay = 100ms, got %s", cfg.Reliability.RetryInitialDelay)
 	}
+
+	if cfg.Queue.Enabled {
+		t.Errorf("expected queue.enabled = false")
+	}
+	if cfg.Queue.MaxInflight != 200 {
+		t.Errorf("expected queue.max_inflight = 200, got %d", cfg.Queue.MaxInflight)
+	}
+	if cfg.Queue.MaxQueueDepth != 1000 {
+		t.Errorf("expected queue.max_queue_depth = 1000, got %d", cfg.Queue.MaxQueueDepth)
+	}
+	if cfg.Queue.CodelTarget.Duration() != 100*time.Millisecond {
+		t.Errorf("expected queue.codel_target = 100ms, got %s", cfg.Queue.CodelTarget)
+	}
+	if cfg.Queue.CodelInterval.Duration() != time.Second {
+		t.Errorf("expected queue.codel_interval = 1s, got %s", cfg.Queue.CodelInterval)
+	}
+	if !reflect.DeepEqual(cfg.Queue.PriorityPaths.High, []string{"/api/payments"}) {
+		t.Errorf("expected queue high paths ['/api/payments'], got %v", cfg.Queue.PriorityPaths.High)
+	}
+	if !reflect.DeepEqual(cfg.Queue.PriorityPaths.Low, []string{"/api/analytics"}) {
+		t.Errorf("expected queue low paths ['/api/analytics'], got %v", cfg.Queue.PriorityPaths.Low)
+	}
 }
 
 func TestValidate_ExtendedRouteFields(t *testing.T) {
@@ -602,6 +624,115 @@ func TestValidate_Reliability(t *testing.T) {
 				}
 			},
 			wantErrText: "reliability.retry_initial_delay",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := parseValidFixture(t)
+			tt.mutate(cfg)
+
+			err := cfg.Validate()
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("expected valid configuration, got: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErrText)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("expected error to contain %q, got: %v", tt.wantErrText, err)
+			}
+		})
+	}
+}
+
+func TestValidate_Queue(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(*config.Config)
+		wantErrText string
+	}{
+		{
+			name: "valid enabled queue config",
+			mutate: func(c *config.Config) {
+				c.Queue = config.QueueConfig{
+					Enabled:       true,
+					MaxInflight:   200,
+					MaxQueueDepth: 1000,
+					CodelTarget:   config.Duration(100 * time.Millisecond),
+					CodelInterval: config.Duration(time.Second),
+					PriorityPaths: config.PriorityPathsConfig{
+						High: []string{"/api/payments"},
+						Low:  []string{"/api/analytics"},
+					},
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "disabled queue ignores zero fields",
+			mutate: func(c *config.Config) {
+				c.Queue = config.QueueConfig{
+					Enabled: false,
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "enabled queue with max_inflight zero",
+			mutate: func(c *config.Config) {
+				c.Queue = config.QueueConfig{
+					Enabled:       true,
+					MaxInflight:   0,
+					MaxQueueDepth: 1000,
+					CodelTarget:   config.Duration(100 * time.Millisecond),
+					CodelInterval: config.Duration(time.Second),
+				}
+			},
+			wantErrText: "queue.max_inflight",
+		},
+		{
+			name: "enabled queue with max_queue_depth zero",
+			mutate: func(c *config.Config) {
+				c.Queue = config.QueueConfig{
+					Enabled:       true,
+					MaxInflight:   200,
+					MaxQueueDepth: 0,
+					CodelTarget:   config.Duration(100 * time.Millisecond),
+					CodelInterval: config.Duration(time.Second),
+				}
+			},
+			wantErrText: "queue.max_queue_depth",
+		},
+		{
+			name: "enabled queue with codel_target zero",
+			mutate: func(c *config.Config) {
+				c.Queue = config.QueueConfig{
+					Enabled:       true,
+					MaxInflight:   200,
+					MaxQueueDepth: 1000,
+					CodelTarget:   0,
+					CodelInterval: config.Duration(time.Second),
+				}
+			},
+			wantErrText: "queue.codel_target",
+		},
+		{
+			name: "enabled queue with codel_interval zero",
+			mutate: func(c *config.Config) {
+				c.Queue = config.QueueConfig{
+					Enabled:       true,
+					MaxInflight:   200,
+					MaxQueueDepth: 1000,
+					CodelTarget:   config.Duration(100 * time.Millisecond),
+					CodelInterval: 0,
+				}
+			},
+			wantErrText: "queue.codel_interval",
 		},
 	}
 
