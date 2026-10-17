@@ -265,6 +265,8 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	t.Setenv("AEGORA_SERVER_IDLE_TIMEOUT", "120s")
 	t.Setenv("AEGORA_OBSERVABILITY_LOG_LEVEL", "warn")
 	t.Setenv("AEGORA_OBSERVABILITY_METRICS_ADDR", "127.0.0.1:9191")
+	t.Setenv("AEGORA_ADMIN_ENABLED", "true")
+	t.Setenv("AEGORA_ADMIN_ADDR", "127.0.0.1:9192")
 
 	cfg, err := config.Load("testdata/valid.yaml")
 	if err != nil {
@@ -288,6 +290,12 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	}
 	if cfg.Observability.MetricsAddr != "127.0.0.1:9191" {
 		t.Errorf("observability.metrics_addr: got %q, want %q", cfg.Observability.MetricsAddr, "127.0.0.1:9191")
+	}
+	if !cfg.Admin.Enabled {
+		t.Errorf("admin.enabled: got false, want true")
+	}
+	if cfg.Admin.Addr != "127.0.0.1:9192" {
+		t.Errorf("admin.addr: got %q, want %q", cfg.Admin.Addr, "127.0.0.1:9192")
 	}
 }
 
@@ -479,6 +487,13 @@ func TestLoad_SampleDevConfig(t *testing.T) {
 	}
 	if cfg.Observability.Tracing.SampleRatio != 1.0 {
 		t.Errorf("expected observability.tracing.sample_ratio = 1.0, got %f", cfg.Observability.Tracing.SampleRatio)
+	}
+
+	if cfg.Admin.Enabled {
+		t.Errorf("expected admin.enabled = false")
+	}
+	if cfg.Admin.Addr != "127.0.0.1:9091" {
+		t.Errorf("expected admin.addr = '127.0.0.1:9091', got %q", cfg.Admin.Addr)
 	}
 }
 
@@ -1293,4 +1308,86 @@ func TestValidate_ObservabilityTracing(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_Admin(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(c *config.Config)
+		wantErrText string
+	}{
+		{
+			name: "disabled admin with empty addr is valid",
+			mutate: func(c *config.Config) {
+				c.Admin = config.AdminConfig{
+					Enabled: false,
+					Addr:    "",
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "disabled admin with addr is valid",
+			mutate: func(c *config.Config) {
+				c.Admin = config.AdminConfig{
+					Enabled: false,
+					Addr:    "127.0.0.1:9091",
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "enabled admin with valid addr is valid",
+			mutate: func(c *config.Config) {
+				c.Admin = config.AdminConfig{
+					Enabled: true,
+					Addr:    "127.0.0.1:9091",
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "enabled admin with empty addr",
+			mutate: func(c *config.Config) {
+				c.Admin = config.AdminConfig{
+					Enabled: true,
+					Addr:    "",
+				}
+			},
+			wantErrText: "admin.addr",
+		},
+		{
+			name: "enabled admin with invalid addr",
+			mutate: func(c *config.Config) {
+				c.Admin = config.AdminConfig{
+					Enabled: true,
+					Addr:    "invalid-addr-missing-port",
+				}
+			},
+			wantErrText: "admin.addr",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := parseValidFixture(t)
+			tt.mutate(cfg)
+
+			err := cfg.Validate()
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("expected valid configuration, got: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErrText)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("expected error to contain %q, got: %v", tt.wantErrText, err)
+			}
+		})
+	}
+}
+
 

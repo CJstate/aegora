@@ -56,6 +56,13 @@ type Config struct {
 	Queue         QueueConfig         `yaml:"queue,omitempty"`
 	Shedding      SheddingConfig      `yaml:"shedding,omitempty"`
 	Cache         CacheConfig         `yaml:"cache,omitempty"`
+	Admin         AdminConfig         `yaml:"admin,omitempty"`
+}
+
+// AdminConfig configures the dedicated administrative HTTP server.
+type AdminConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Addr    string `yaml:"addr"`
 }
 
 // CacheConfig configures HTTP response caching for GET and HEAD requests.
@@ -218,6 +225,14 @@ func applyEnvOverrides(cfg *Config) error {
 		cfg.Observability.MetricsAddr = val
 	}
 
+	if val, ok := os.LookupEnv("AEGORA_ADMIN_ENABLED"); ok {
+		cfg.Admin.Enabled = strings.ToLower(strings.TrimSpace(val)) == "true" || val == "1"
+	}
+
+	if val, ok := os.LookupEnv("AEGORA_ADMIN_ADDR"); ok {
+		cfg.Admin.Addr = val
+	}
+
 	return nil
 }
 
@@ -306,6 +321,15 @@ func (c *Config) Validate() error {
 		}
 		if c.Observability.Tracing.Exporter == "otlp" && strings.TrimSpace(c.Observability.Tracing.OTLPEndpoint) == "" {
 			return errors.New("config: observability.tracing.otlp_endpoint: required when exporter is otlp")
+		}
+	}
+
+	if c.Admin.Enabled {
+		if strings.TrimSpace(c.Admin.Addr) == "" {
+			return errors.New("config: admin.addr: required when admin is enabled")
+		}
+		if _, err := net.ResolveTCPAddr("tcp", c.Admin.Addr); err != nil {
+			return fmt.Errorf("config: admin.addr: invalid address %q: %w", c.Admin.Addr, err)
 		}
 	}
 
