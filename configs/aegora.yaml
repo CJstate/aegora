@@ -29,6 +29,10 @@ observability:
     otlp_endpoint: "localhost:4318"
     sample_ratio: 1.0
 
+admin:
+  enabled: false
+  addr: "127.0.0.1:9091"
+
 rate_limit:
   enabled: true
   limiter: "sliding_window"

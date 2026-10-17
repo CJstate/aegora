@@ -72,7 +72,33 @@ func New(reg *prometheus.Registry) *Metrics {
 		),
 	}
 
-	reg.MustRegister(m.RequestsTotal, m.RequestDuration, m.Inflight)
+	if err := reg.Register(m.RequestsTotal); err != nil {
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			if existing, ok := are.ExistingCollector.(*prometheus.CounterVec); ok {
+				m.RequestsTotal = existing
+			}
+		} else {
+			panic(err)
+		}
+	}
+	if err := reg.Register(m.RequestDuration); err != nil {
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			if existing, ok := are.ExistingCollector.(*prometheus.HistogramVec); ok {
+				m.RequestDuration = existing
+			}
+		} else {
+			panic(err)
+		}
+	}
+	if err := reg.Register(m.Inflight); err != nil {
+		if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			if existing, ok := are.ExistingCollector.(*prometheus.GaugeVec); ok {
+				m.Inflight = existing
+			}
+		} else {
+			panic(err)
+		}
+	}
 	return m
 }
 
