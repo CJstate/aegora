@@ -1,0 +1,21 @@
+server:
+  addr: "127.0.0.1:8080"
+  read_timeout: "15s"
+  write_timeout: "30s"
+  idle_timeout: "60s"
+
+routes:
+  - name: "api"
+    path_prefix: "/api/v1"
+    targets:
+      - "http://127.0.0.1:8081"
+      - "http://127.0.0.1:8082"
+    strip_prefix: "/api/v1"
+  - name: "auth"
+    path_prefix: "/auth"
+    targets:
+      - "https://auth.example.com"
+
+observability:
+  log_level: "debug"
+  metrics_addr: "127.0.0.1:9090"
