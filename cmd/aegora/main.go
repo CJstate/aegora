@@ -19,6 +19,7 @@ import (
 	"github.com/syncronix-labs/aegora/internal/config"
 	"github.com/syncronix-labs/aegora/internal/middleware"
 	"github.com/syncronix-labs/aegora/internal/proxy"
+	"github.com/syncronix-labs/aegora/internal/queue"
 	"github.com/syncronix-labs/aegora/internal/ratelimit"
 	"github.com/syncronix-labs/aegora/internal/reliability"
 )
@@ -167,6 +168,40 @@ func toReliabilityConfig(cfg config.ReliabilityConfig) proxy.ReliabilityConfig {
 	}
 }
 
+// buildApp constructs the HTTP handler wrapped with the middleware chain and optional admission queue.
+func buildApp(cfg *config.Config, logger *slog.Logger) (http.Handler, *queue.Queue, error) {
+	gwRoutes := toProxyRoutes(cfg.Routes)
+	rc := toReliabilityConfig(cfg.Reliability)
+	gw, err := proxy.NewGateway(gwRoutes, rc)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build gateway: %w", err)
+	}
+
+	var gwHandler http.Handler = gw
+	var q *queue.Queue
+	if cfg.Queue.Enabled {
+		cd := queue.NewCodel(cfg.Queue.CodelTarget.Duration(), cfg.Queue.CodelInterval.Duration())
+		q = queue.NewQueue(cfg.Queue.MaxInflight, cfg.Queue.MaxQueueDepth, cd, cfg.Queue.PriorityPaths.High, cfg.Queue.PriorityPaths.Low)
+		gwHandler = q.Admit(gw)
+	}
+
+	mux := buildMux(gwHandler)
+
+	mws := []middleware.Middleware{
+		middleware.Recovery(logger),
+		middleware.RequestID,
+		middleware.AccessLog(logger),
+	}
+
+	if cfg.RateLimit.Enabled {
+		mws = append(mws, buildRateLimitMiddleware(cfg.RateLimit))
+	}
+
+	chain := middleware.New(mws...)
+
+	return chain.Then(mux), q, nil
+}
+
 // buildHandler constructs the HTTP handler wrapped with the middleware chain.
 //
 // Middleware chain ordering rationale:
@@ -181,29 +216,18 @@ func toReliabilityConfig(cfg config.ReliabilityConfig) proxy.ReliabilityConfig {
 //  4. RateLimit (optional): Positioned between AccessLog and the mux/gateway to enforce
 //     per-key rate limits while ensuring rejected requests (429) are logged by AccessLog
 //     with assigned request IDs.
+//  5. Queue Admission (optional): Positioned between RateLimit and the upstream gateway to enforce
+//     concurrency limits and CoDel bufferbloat drops on traffic routed to backend targets, while
+//     bypassing /livez and /readyz health probes.
 func buildHandler(cfg *config.Config, logger *slog.Logger) (http.Handler, error) {
-	gwRoutes := toProxyRoutes(cfg.Routes)
-	rc := toReliabilityConfig(cfg.Reliability)
-	gw, err := proxy.NewGateway(gwRoutes, rc)
+	h, q, err := buildApp(cfg, logger)
 	if err != nil {
-		return nil, fmt.Errorf("build gateway: %w", err)
+		return nil, err
 	}
-
-	mux := buildMux(gw)
-
-	mws := []middleware.Middleware{
-		middleware.Recovery(logger),
-		middleware.RequestID,
-		middleware.AccessLog(logger),
+	if q != nil {
+		q.Start()
 	}
-
-	if cfg.RateLimit.Enabled {
-		mws = append(mws, buildRateLimitMiddleware(cfg.RateLimit))
-	}
-
-	chain := middleware.New(mws...)
-
-	return chain.Then(mux), nil
+	return h, nil
 }
 
 // isCLITestRun detects if the binary was invoked by the repository integration test runner.
@@ -241,10 +265,13 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 
-	handler, err := buildHandler(cfg, logger)
+	handler, q, err := buildApp(cfg, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error building handler: %v\n", err)
 		os.Exit(1)
+	}
+	if q != nil {
+		q.Start()
 	}
 
 	server := &http.Server{
@@ -258,6 +285,9 @@ func main() {
 	logger.Info("Aegora starting...", slog.String("addr", cfg.Server.Addr))
 
 	if isCLITestRun() {
+		if q != nil {
+			q.Stop()
+		}
 		return
 	}
 
@@ -278,6 +308,10 @@ func main() {
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+
+		if q != nil {
+			q.Stop()
+		}
 
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			logger.Error("shutdown error", slog.String("error", err.Error()))

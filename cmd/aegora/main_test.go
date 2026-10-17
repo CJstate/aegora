@@ -382,3 +382,77 @@ func TestBuildHandler_RateLimiting(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildHandler_QueueAdmission(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"proxied"}`))
+	}))
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:         "127.0.0.1:8080",
+			ReadTimeout:  config.Duration(15 * time.Second),
+			WriteTimeout: config.Duration(15 * time.Second),
+			IdleTimeout:  config.Duration(30 * time.Second),
+		},
+		Routes: []config.RouteConfig{
+			{
+				Name:       "api-route",
+				PathPrefix: "/api",
+				Targets:    []string{backend.URL},
+			},
+		},
+		Observability: config.ObservabilityConfig{
+			LogLevel: "info",
+		},
+		Queue: config.QueueConfig{
+			Enabled:       true,
+			MaxInflight:   2,
+			MaxQueueDepth: 5,
+			CodelTarget:   config.Duration(100 * time.Millisecond),
+			CodelInterval: config.Duration(time.Second),
+			PriorityPaths: config.PriorityPathsConfig{
+				High: []string{"/api/priority"},
+				Low:  []string{"/api/bulk"},
+			},
+		},
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, q, err := buildApp(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildApp: %v", err)
+	}
+	if q == nil {
+		t.Fatal("expected non-nil queue when queue is enabled")
+	}
+	q.Start()
+	defer q.Stop()
+
+	// 1. Livez bypasses queue completely
+	recLivez := httptest.NewRecorder()
+	reqLivez := httptest.NewRequest(http.MethodGet, "/livez", nil)
+	handler.ServeHTTP(recLivez, reqLivez)
+	if recLivez.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /livez, got %d", recLivez.Code)
+	}
+
+	// 2. Normal request through queue to backend succeeds
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /api/data, got %d (body: %s)", rec1.Code, rec1.Body.String())
+	}
+
+	// 3. High priority request through queue to backend succeeds
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/api/priority/pay", nil)
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /api/priority/pay, got %d", rec2.Code)
+	}
+}

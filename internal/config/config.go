@@ -52,6 +52,23 @@ type Config struct {
 	Observability ObservabilityConfig `yaml:"observability"`
 	RateLimit     RateLimitConfig     `yaml:"rate_limit,omitempty"`
 	Reliability   ReliabilityConfig   `yaml:"reliability,omitempty"`
+	Queue         QueueConfig         `yaml:"queue,omitempty"`
+}
+
+// PriorityPathsConfig configures path prefixes mapped to request priorities.
+type PriorityPathsConfig struct {
+	High []string `yaml:"high,omitempty"`
+	Low  []string `yaml:"low,omitempty"`
+}
+
+// QueueConfig holds admission-control queue and CoDel configuration.
+type QueueConfig struct {
+	Enabled       bool                `yaml:"enabled"`
+	MaxInflight   int                 `yaml:"max_inflight,omitempty"`
+	MaxQueueDepth int                 `yaml:"max_queue_depth,omitempty"`
+	CodelTarget   Duration            `yaml:"codel_target,omitempty"`
+	CodelInterval Duration            `yaml:"codel_interval,omitempty"`
+	PriorityPaths PriorityPathsConfig `yaml:"priority_paths,omitempty"`
 }
 
 // ReliabilityConfig holds circuit breaking and retry configuration.
@@ -278,6 +295,21 @@ func (c *Config) Validate() error {
 			if c.Reliability.RetryInitialDelay <= 0 {
 				return fmt.Errorf("config: reliability.retry_initial_delay: must be positive, got %s", c.Reliability.RetryInitialDelay)
 			}
+		}
+	}
+
+	if c.Queue.Enabled {
+		if c.Queue.MaxInflight <= 0 {
+			return fmt.Errorf("config: queue.max_inflight: must be positive, got %d", c.Queue.MaxInflight)
+		}
+		if c.Queue.MaxQueueDepth <= 0 {
+			return fmt.Errorf("config: queue.max_queue_depth: must be positive, got %d", c.Queue.MaxQueueDepth)
+		}
+		if c.Queue.CodelTarget <= 0 {
+			return fmt.Errorf("config: queue.codel_target: must be positive, got %s", c.Queue.CodelTarget)
+		}
+		if c.Queue.CodelInterval <= 0 {
+			return fmt.Errorf("config: queue.codel_interval: must be positive, got %s", c.Queue.CodelInterval)
 		}
 	}
 
