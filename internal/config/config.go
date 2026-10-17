@@ -51,6 +51,45 @@ type Config struct {
 	Routes        []RouteConfig       `yaml:"routes"`
 	Observability ObservabilityConfig `yaml:"observability"`
 	RateLimit     RateLimitConfig     `yaml:"rate_limit,omitempty"`
+	Reliability   ReliabilityConfig   `yaml:"reliability,omitempty"`
+	Queue         QueueConfig         `yaml:"queue,omitempty"`
+	Shedding      SheddingConfig      `yaml:"shedding,omitempty"`
+}
+
+// SheddingConfig configures adaptive load shedding with an AIMD controller.
+// Note: priority_paths may be shared with the queue section in a future unified
+// classification model; for now, each section owns its independent copy.
+type SheddingConfig struct {
+	Enabled        bool                `yaml:"enabled"`
+	TargetP99      Duration            `yaml:"target_p99,omitempty"`
+	MinAdmitRate   float64             `yaml:"min_admit_rate,omitempty"`
+	AdjustInterval Duration            `yaml:"adjust_interval,omitempty"`
+	PriorityPaths  PriorityPathsConfig `yaml:"priority_paths,omitempty"`
+}
+
+// PriorityPathsConfig configures path prefixes mapped to request priorities.
+type PriorityPathsConfig struct {
+	High []string `yaml:"high,omitempty"`
+	Low  []string `yaml:"low,omitempty"`
+}
+
+// QueueConfig holds admission-control queue and CoDel configuration.
+type QueueConfig struct {
+	Enabled       bool                `yaml:"enabled"`
+	MaxInflight   int                 `yaml:"max_inflight,omitempty"`
+	MaxQueueDepth int                 `yaml:"max_queue_depth,omitempty"`
+	CodelTarget   Duration            `yaml:"codel_target,omitempty"`
+	CodelInterval Duration            `yaml:"codel_interval,omitempty"`
+	PriorityPaths PriorityPathsConfig `yaml:"priority_paths,omitempty"`
+}
+
+// ReliabilityConfig holds circuit breaking and retry configuration.
+type ReliabilityConfig struct {
+	BreakerFailureThreshold int      `yaml:"breaker_failure_threshold,omitempty"`
+	BreakerCooldown         Duration `yaml:"breaker_cooldown,omitempty"`
+	RetryEnabled            bool     `yaml:"retry_enabled,omitempty"`
+	RetryMaxAttempts        int      `yaml:"retry_max_attempts,omitempty"`
+	RetryInitialDelay       Duration `yaml:"retry_initial_delay,omitempty"`
 }
 
 // RateLimitConfig configures gateway request rate limiting behavior.
@@ -251,5 +290,60 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.isReliabilityPresent() {
+		if c.Reliability.BreakerFailureThreshold < 1 {
+			return fmt.Errorf("config: reliability.breaker_failure_threshold: must be at least 1, got %d", c.Reliability.BreakerFailureThreshold)
+		}
+
+		if c.Reliability.BreakerCooldown <= 0 {
+			return fmt.Errorf("config: reliability.breaker_cooldown: must be positive, got %s", c.Reliability.BreakerCooldown)
+		}
+
+		if c.Reliability.RetryEnabled || c.Reliability.RetryMaxAttempts != 0 || c.Reliability.RetryInitialDelay != 0 {
+			if c.Reliability.RetryMaxAttempts < 1 {
+				return fmt.Errorf("config: reliability.retry_max_attempts: must be at least 1, got %d", c.Reliability.RetryMaxAttempts)
+			}
+
+			if c.Reliability.RetryInitialDelay <= 0 {
+				return fmt.Errorf("config: reliability.retry_initial_delay: must be positive, got %s", c.Reliability.RetryInitialDelay)
+			}
+		}
+	}
+
+	if c.Queue.Enabled {
+		if c.Queue.MaxInflight <= 0 {
+			return fmt.Errorf("config: queue.max_inflight: must be positive, got %d", c.Queue.MaxInflight)
+		}
+		if c.Queue.MaxQueueDepth <= 0 {
+			return fmt.Errorf("config: queue.max_queue_depth: must be positive, got %d", c.Queue.MaxQueueDepth)
+		}
+		if c.Queue.CodelTarget <= 0 {
+			return fmt.Errorf("config: queue.codel_target: must be positive, got %s", c.Queue.CodelTarget)
+		}
+		if c.Queue.CodelInterval <= 0 {
+			return fmt.Errorf("config: queue.codel_interval: must be positive, got %s", c.Queue.CodelInterval)
+		}
+	}
+
+	if c.Shedding.Enabled {
+		if c.Shedding.TargetP99 <= 0 {
+			return fmt.Errorf("config: shedding.target_p99: must be positive, got %s", c.Shedding.TargetP99)
+		}
+		if c.Shedding.MinAdmitRate <= 0.0 || c.Shedding.MinAdmitRate >= 1.0 {
+			return fmt.Errorf("config: shedding.min_admit_rate: must be between 0.0 and 1.0 (exclusive), got %f", c.Shedding.MinAdmitRate)
+		}
+		if c.Shedding.AdjustInterval <= 0 {
+			return fmt.Errorf("config: shedding.adjust_interval: must be positive, got %s", c.Shedding.AdjustInterval)
+		}
+	}
+
 	return nil
+}
+
+func (c *Config) isReliabilityPresent() bool {
+	return c.Reliability.BreakerFailureThreshold != 0 ||
+		c.Reliability.BreakerCooldown != 0 ||
+		c.Reliability.RetryEnabled ||
+		c.Reliability.RetryMaxAttempts != 0 ||
+		c.Reliability.RetryInitialDelay != 0
 }

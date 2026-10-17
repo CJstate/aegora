@@ -7,7 +7,20 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/syncronix-labs/aegora/internal/reliability"
 )
+
+func defaultTestReliabilityConfig() ReliabilityConfig {
+	return ReliabilityConfig{
+		BreakerFailureThreshold: 5,
+		BreakerCooldown:         30 * time.Second,
+		BreakerHalfOpenProbes:   2,
+		BreakerSuccessThreshold: 2,
+		RetryEnabled:            false,
+	}
+}
 
 func TestGateway_RoutingAndForwarding(t *testing.T) {
 	var mu sync.Mutex
@@ -60,7 +73,7 @@ func TestGateway_RoutingAndForwarding(t *testing.T) {
 		},
 	}
 
-	gw, err := NewGateway(routes)
+	gw, err := NewGateway(routes, defaultTestReliabilityConfig())
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
@@ -189,7 +202,7 @@ func TestGateway_HeaderSanitizationAndAegoraHeader(t *testing.T) {
 		},
 	}
 
-	gw, err := NewGateway(routes)
+	gw, err := NewGateway(routes, defaultTestReliabilityConfig())
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
@@ -229,7 +242,7 @@ func TestGateway_AllUpstreamsUnavailable(t *testing.T) {
 		},
 	}
 
-	gw, err := NewGateway(routes)
+	gw, err := NewGateway(routes, defaultTestReliabilityConfig())
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
@@ -272,7 +285,7 @@ func TestGateway_UnreachableBackendReportsFailure(t *testing.T) {
 		},
 	}
 
-	gw, err := NewGateway(routes)
+	gw, err := NewGateway(routes, defaultTestReliabilityConfig())
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
@@ -307,7 +320,7 @@ func TestGateway_NewGatewayInvalidRoute(t *testing.T) {
 		},
 	}
 
-	_, err := NewGateway(routes)
+	_, err := NewGateway(routes, defaultTestReliabilityConfig())
 	if err == nil {
 		t.Fatal("expected NewGateway error for invalid target URL, got nil")
 	}
@@ -333,7 +346,7 @@ func TestGateway_DoesNotLeakBackendError(t *testing.T) {
 		},
 	}
 
-	gw, err := NewGateway(routes)
+	gw, err := NewGateway(routes, defaultTestReliabilityConfig())
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
 	}
@@ -347,5 +360,138 @@ func TestGateway_DoesNotLeakBackendError(t *testing.T) {
 	// Must strictly equal `{"error":"bad gateway"}` and never contain dial tcp or connection refused
 	if string(body) != `{"error":"bad gateway"}` {
 		t.Fatalf("leaked backend error details: %s", string(body))
+	}
+}
+
+func TestGateway_CircuitBreakerForcedOpenReturns503(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	routes := []RouteConfig{
+		{
+			Name:       "cb-route",
+			PathPrefix: "/cb",
+			Targets:    []string{backend.URL},
+		},
+	}
+
+	rc := ReliabilityConfig{
+		BreakerFailureThreshold: 2,
+		BreakerCooldown:         time.Minute,
+		BreakerHalfOpenProbes:   1,
+		BreakerSuccessThreshold: 1,
+		RetryEnabled:            false,
+	}
+
+	gw, err := NewGateway(routes, rc)
+	if err != nil {
+		t.Fatalf("NewGateway: %v", err)
+	}
+
+	// Unexported in-package access: force the route's circuit breaker open
+	for _, entry := range gw.routes {
+		entry.breaker.RecordFailure()
+		entry.breaker.RecordFailure()
+		if entry.breaker.State() != reliability.StateOpen {
+			t.Fatalf("expected open breaker state, got %v", entry.breaker.State())
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/cb/test", nil)
+
+	gw.ServeHTTP(rec, req)
+
+	// Assert 503 Service Unavailable, NOT 502 Bad Gateway
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 Service Unavailable, got %d", rec.Code)
+	}
+
+	if rec.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("expected application/json Content-Type, got %q", rec.Header().Get("Content-Type"))
+	}
+
+	var parsed map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("failed to parse JSON response body: %v", err)
+	}
+	if parsed["error"] != "service unavailable" {
+		t.Fatalf("expected error 'service unavailable', got %q", parsed["error"])
+	}
+}
+
+func TestGateway_InvalidReliabilityConfig(t *testing.T) {
+	routes := []RouteConfig{
+		{
+			Name:       "test-route",
+			PathPrefix: "/test",
+			Targets:    []string{"http://127.0.0.1:8080"},
+		},
+	}
+
+	tests := []struct {
+		name string
+		rc   ReliabilityConfig
+	}{
+		{
+			name: "zero breaker failure threshold",
+			rc: ReliabilityConfig{
+				BreakerFailureThreshold: 0,
+				BreakerCooldown:         time.Second,
+				BreakerHalfOpenProbes:   1,
+				BreakerSuccessThreshold: 1,
+			},
+		},
+		{
+			name: "zero breaker cooldown",
+			rc: ReliabilityConfig{
+				BreakerFailureThreshold: 1,
+				BreakerCooldown:         0,
+				BreakerHalfOpenProbes:   1,
+				BreakerSuccessThreshold: 1,
+			},
+		},
+		{
+			name: "zero half open probes",
+			rc: ReliabilityConfig{
+				BreakerFailureThreshold: 1,
+				BreakerCooldown:         time.Second,
+				BreakerHalfOpenProbes:   0,
+				BreakerSuccessThreshold: 1,
+			},
+		},
+		{
+			name: "zero success threshold",
+			rc: ReliabilityConfig{
+				BreakerFailureThreshold: 1,
+				BreakerCooldown:         time.Second,
+				BreakerHalfOpenProbes:   1,
+				BreakerSuccessThreshold: 0,
+			},
+		},
+		{
+			name: "invalid retry policy when retry enabled",
+			rc: ReliabilityConfig{
+				BreakerFailureThreshold: 1,
+				BreakerCooldown:         time.Second,
+				BreakerHalfOpenProbes:   1,
+				BreakerSuccessThreshold: 1,
+				RetryEnabled:            true,
+				RetryPolicy: reliability.RetryPolicy{
+					MaxAttempts: 0, // invalid
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewGateway(routes, tt.rc)
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tt.name)
+			}
+		})
 	}
 }
