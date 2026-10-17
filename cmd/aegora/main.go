@@ -16,15 +16,21 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/trace"
 	"github.com/syncronix-labs/aegora/internal/cache"
 	"github.com/syncronix-labs/aegora/internal/config"
+	"github.com/syncronix-labs/aegora/internal/metrics"
 	"github.com/syncronix-labs/aegora/internal/middleware"
 	"github.com/syncronix-labs/aegora/internal/proxy"
 	"github.com/syncronix-labs/aegora/internal/queue"
 	"github.com/syncronix-labs/aegora/internal/ratelimit"
 	"github.com/syncronix-labs/aegora/internal/reliability"
 	"github.com/syncronix-labs/aegora/internal/shedding"
+	"github.com/syncronix-labs/aegora/internal/tracing"
 )
 
 // toProxyRoutes maps config.RouteConfig definitions into proxy.RouteConfig structures.
@@ -120,21 +126,9 @@ func buildRateLimitMiddleware(cfg config.RateLimitConfig) middleware.Middleware 
 	return middleware.RateLimit(limiterFactory, keyFn, []string{"/livez", "/readyz"})
 }
 
-// buildHandler constructs the HTTP handler wrapped with the middleware chain.
-//
-// Middleware chain ordering rationale:
-//  1. Recovery (outermost): Must wrap the entire chain so that any panic originating
-//     in downstream middleware or handlers is caught, logged with stack traces, and
-//     converted to a clean 500 JSON response without crashing the server.
-//  2. RequestID: Must execute before AccessLog and the handlers so that an X-Request-ID
-//     is generated/extracted and added to the request context early, making it available
-//     to both the access logger and all downstream business logic.
-//  3. AccessLog: Positioned after RequestID to capture the assigned request_id, and
-//     measure exact routing and handler execution latency while capturing the final HTTP status code.
-//  4. RateLimit (optional): Positioned between AccessLog and the mux/gateway to enforce
-//
-// toReliabilityConfig maps config.ReliabilityConfig to proxy.ReliabilityConfig with sensible defaults.
-func toReliabilityConfig(cfg config.ReliabilityConfig) proxy.ReliabilityConfig {
+// toReliabilityConfig maps config.ReliabilityConfig to proxy.ReliabilityConfig with sensible defaults
+// and configures the base HTTP transport.
+func toReliabilityConfig(cfg config.ReliabilityConfig, baseTransport http.RoundTripper) proxy.ReliabilityConfig {
 	threshold := cfg.BreakerFailureThreshold
 	if threshold <= 0 {
 		threshold = 5
@@ -168,16 +162,48 @@ func toReliabilityConfig(cfg config.ReliabilityConfig) proxy.ReliabilityConfig {
 			Multiplier:   2.0,
 			Jitter:       1.0,
 		},
+		BaseTransport: baseTransport,
 	}
 }
 
 // buildApp constructs the HTTP handler wrapped with the middleware chain and optional admission queue.
 func buildApp(cfg *config.Config, logger *slog.Logger) (http.Handler, *queue.Queue, error) {
+	h, q, _, _, err := buildAppWithRegistry(cfg, logger, nil)
+	return h, q, err
+}
+
+// buildAppWithRegistry constructs the HTTP handler wrapped with the middleware chain, metrics, tracing, and optional admission queue.
+func buildAppWithRegistry(cfg *config.Config, logger *slog.Logger, reg *prometheus.Registry) (http.Handler, *queue.Queue, *prometheus.Registry, func(context.Context) error, error) {
+	if reg == nil {
+		reg = prometheus.NewRegistry()
+	}
+
+	var tracingShutdown func(context.Context) error
+	var tracer trace.Tracer
+	var baseTransport http.RoundTripper = proxy.NewTransport()
+
+	if cfg.Observability.Tracing.Enabled {
+		tp, shutdown, err := tracing.Setup("aegora", tracing.Config{
+			Enabled:      cfg.Observability.Tracing.Enabled,
+			Exporter:     cfg.Observability.Tracing.Exporter,
+			OTLPEndpoint: cfg.Observability.Tracing.OTLPEndpoint,
+			SampleRatio:  cfg.Observability.Tracing.SampleRatio,
+		})
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("setup tracing: %w", err)
+		}
+		tracingShutdown = shutdown
+		tracer = tp.Tracer("github.com/syncronix-labs/aegora")
+		// Wrap the shared base http.Transport with otelhttp.NewTransport BEFORE
+		// the breaker/retry chain is built on top of it.
+		baseTransport = otelhttp.NewTransport(baseTransport)
+	}
+
 	gwRoutes := toProxyRoutes(cfg.Routes)
-	rc := toReliabilityConfig(cfg.Reliability)
+	rc := toReliabilityConfig(cfg.Reliability, baseTransport)
 	gw, err := proxy.NewGateway(gwRoutes, rc)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build gateway: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("build gateway: %w", err)
 	}
 
 	var gwHandler http.Handler = gw
@@ -236,8 +262,16 @@ func buildApp(cfg *config.Config, logger *slog.Logger) (http.Handler, *queue.Que
 	mws := []middleware.Middleware{
 		middleware.Recovery(logger),
 		middleware.RequestID,
-		middleware.AccessLog(logger),
 	}
+
+	if cfg.Observability.Tracing.Enabled {
+		mws = append(mws, tracing.Middleware(tracer, gw.Router()))
+	}
+
+	mws = append(mws,
+		metrics.Middleware(reg, gw.Router()),
+		middleware.AccessLog(logger),
+	)
 
 	// Adaptive load shedding: shed globally before spending per-key rate-limit
 	// budget or queue capacity. When overloaded, dropping traffic early prevents
@@ -259,7 +293,7 @@ func buildApp(cfg *config.Config, logger *slog.Logger) (http.Handler, *queue.Que
 
 	chain := middleware.New(mws...)
 
-	return chain.Then(mux), q, nil
+	return chain.Then(mux), q, reg, tracingShutdown, nil
 }
 
 // buildHandler constructs the HTTP handler wrapped with the middleware chain.
@@ -268,22 +302,39 @@ func buildApp(cfg *config.Config, logger *slog.Logger) (http.Handler, *queue.Que
 //  1. Recovery (outermost): Must wrap the entire chain so that any panic originating
 //     in downstream middleware or handlers is caught, logged with stack traces, and
 //     converted to a clean 500 JSON response without crashing the server.
-//  2. RequestID: Must execute before AccessLog and the handlers so that an X-Request-ID
+//  2. RequestID: Must execute before AccessLog, Tracing, Metrics, and handlers so that an X-Request-ID
 //     is generated/extracted and added to the request context early, making it available
-//     to both the access logger and all downstream business logic.
-//  3. AccessLog: Positioned after RequestID to capture the assigned request_id, and
+//     to all downstream telemetry and business logic.
+//  3. Tracing (optional): Positioned next to metrics (after RequestID) so that the span
+//     covers shedding, rate-limiting, response caching, queue admission, and upstream proxy execution.
+//  4. Prometheus Metrics: Positioned next to Tracing so that shed (503),
+//     rate-limited (429), and unmatched (404) requests are all counted and observed
+//     with their exact final status code.
+//  5. AccessLog: Positioned after Tracing and Metrics to capture the assigned request_id, and
 //     measure exact routing and handler execution latency while capturing the final HTTP status code.
-//  4. Load Shedding (optional): Positioned immediately after AccessLog and before RateLimit to shed
+//  6. Load Shedding (optional): Positioned immediately after AccessLog and before RateLimit to shed
 //     globally before spending per-key rate-limit budget or queue capacity.
-//  5. RateLimit (optional): Positioned between Load Shedding and Cache / mux / gateway to enforce
+//  7. RateLimit (optional): Positioned between Load Shedding and Cache / mux / gateway to enforce
 //     per-key rate limits uniformly on all incoming requests.
-//  6. Cache (optional): Positioned between RateLimit and Queue.Admit so that hits skip
+//  8. Cache (optional): Positioned between RateLimit and Queue.Admit so that hits skip
 //     queueing and backend load (the expensive parts) while per-key rate limiting still applies uniformly.
-//  7. Queue Admission (optional): Positioned between Cache and the upstream gateway to enforce
+//  9. Queue Admission (optional): Positioned between Cache and the upstream gateway to enforce
 //     concurrency limits and CoDel bufferbloat drops on traffic routed to backend targets, while
 //     bypassing /livez and /readyz health probes.
 func buildHandler(cfg *config.Config, logger *slog.Logger) (http.Handler, error) {
 	h, q, err := buildApp(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	if q != nil {
+		q.Start()
+	}
+	return h, nil
+}
+
+// buildHandlerWithRegistry constructs the HTTP handler using an explicitly provided Prometheus registry.
+func buildHandlerWithRegistry(cfg *config.Config, logger *slog.Logger, reg *prometheus.Registry) (http.Handler, error) {
+	h, q, _, _, err := buildAppWithRegistry(cfg, logger, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +379,7 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 
-	handler, q, err := buildApp(cfg, logger)
+	handler, q, reg, tracingShutdown, err := buildAppWithRegistry(cfg, logger, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error building handler: %v\n", err)
 		os.Exit(1)
@@ -345,11 +396,37 @@ func main() {
 		IdleTimeout:  time.Duration(cfg.Server.IdleTimeout),
 	}
 
+	var metricsServer *http.Server
+	if cfg.Observability.MetricsAddr != "" {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+		metricsServer = &http.Server{
+			Addr:         cfg.Observability.MetricsAddr,
+			Handler:      metricsMux,
+			ReadTimeout:  15 * time.Second,
+			WriteTimeout: 15 * time.Second,
+			IdleTimeout:  30 * time.Second,
+		}
+
+		logger.Info("metrics server starting...", slog.String("addr", cfg.Observability.MetricsAddr))
+		go func() {
+			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("metrics server error", slog.String("error", err.Error()))
+			}
+		}()
+	}
+
 	logger.Info("Aegora starting...", slog.String("addr", cfg.Server.Addr))
 
 	if isCLITestRun() {
 		if q != nil {
 			q.Stop()
+		}
+		if metricsServer != nil {
+			_ = metricsServer.Close()
+		}
+		if tracingShutdown != nil {
+			_ = tracingShutdown(context.Background())
 		}
 		return
 	}
@@ -367,6 +444,12 @@ func main() {
 			<-sigChan
 			logger.Warn("second signal received, forcing immediate close")
 			_ = server.Close()
+			if metricsServer != nil {
+				_ = metricsServer.Close()
+			}
+			if tracingShutdown != nil {
+				_ = tracingShutdown(context.Background())
+			}
 		}()
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -376,8 +459,20 @@ func main() {
 			q.Stop()
 		}
 
+		if metricsServer != nil {
+			if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+				logger.Error("metrics server shutdown error", slog.String("error", err.Error()))
+			}
+		}
+
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			logger.Error("shutdown error", slog.String("error", err.Error()))
+		}
+
+		if tracingShutdown != nil {
+			if err := tracingShutdown(shutdownCtx); err != nil {
+				logger.Error("tracing shutdown error", slog.String("error", err.Error()))
+			}
 		}
 
 		logger.Info("shutdown complete")
