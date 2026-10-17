@@ -377,6 +377,63 @@ func TestLoad_SampleDevConfig(t *testing.T) {
 	if cfg.RateLimit.Key != "ip" {
 		t.Errorf("expected rate_limit.key = ip, got %s", cfg.RateLimit.Key)
 	}
+
+	if cfg.Reliability.BreakerFailureThreshold != 5 {
+		t.Errorf("expected breaker_failure_threshold = 5, got %d", cfg.Reliability.BreakerFailureThreshold)
+	}
+	if cfg.Reliability.BreakerCooldown.Duration() != 30*time.Second {
+		t.Errorf("expected breaker_cooldown = 30s, got %s", cfg.Reliability.BreakerCooldown)
+	}
+	if !cfg.Reliability.RetryEnabled {
+		t.Errorf("expected retry_enabled = true")
+	}
+	if cfg.Reliability.RetryMaxAttempts != 3 {
+		t.Errorf("expected retry_max_attempts = 3, got %d", cfg.Reliability.RetryMaxAttempts)
+	}
+	if cfg.Reliability.RetryInitialDelay.Duration() != 100*time.Millisecond {
+		t.Errorf("expected retry_initial_delay = 100ms, got %s", cfg.Reliability.RetryInitialDelay)
+	}
+
+	if cfg.Queue.Enabled {
+		t.Errorf("expected queue.enabled = false")
+	}
+	if cfg.Queue.MaxInflight != 200 {
+		t.Errorf("expected queue.max_inflight = 200, got %d", cfg.Queue.MaxInflight)
+	}
+	if cfg.Queue.MaxQueueDepth != 1000 {
+		t.Errorf("expected queue.max_queue_depth = 1000, got %d", cfg.Queue.MaxQueueDepth)
+	}
+	if cfg.Queue.CodelTarget.Duration() != 100*time.Millisecond {
+		t.Errorf("expected queue.codel_target = 100ms, got %s", cfg.Queue.CodelTarget)
+	}
+	if cfg.Queue.CodelInterval.Duration() != time.Second {
+		t.Errorf("expected queue.codel_interval = 1s, got %s", cfg.Queue.CodelInterval)
+	}
+	if !reflect.DeepEqual(cfg.Queue.PriorityPaths.High, []string{"/api/payments"}) {
+		t.Errorf("expected queue high paths ['/api/payments'], got %v", cfg.Queue.PriorityPaths.High)
+	}
+	if !reflect.DeepEqual(cfg.Queue.PriorityPaths.Low, []string{"/api/analytics"}) {
+		t.Errorf("expected queue low paths ['/api/analytics'], got %v", cfg.Queue.PriorityPaths.Low)
+	}
+
+	if cfg.Shedding.Enabled {
+		t.Errorf("expected shedding.enabled = false")
+	}
+	if cfg.Shedding.TargetP99.Duration() != 500*time.Millisecond {
+		t.Errorf("expected shedding.target_p99 = 500ms, got %s", cfg.Shedding.TargetP99)
+	}
+	if cfg.Shedding.MinAdmitRate != 0.05 {
+		t.Errorf("expected shedding.min_admit_rate = 0.05, got %f", cfg.Shedding.MinAdmitRate)
+	}
+	if cfg.Shedding.AdjustInterval.Duration() != time.Second {
+		t.Errorf("expected shedding.adjust_interval = 1s, got %s", cfg.Shedding.AdjustInterval)
+	}
+	if !reflect.DeepEqual(cfg.Shedding.PriorityPaths.High, []string{"/api/payments"}) {
+		t.Errorf("expected shedding high paths ['/api/payments'], got %v", cfg.Shedding.PriorityPaths.High)
+	}
+	if !reflect.DeepEqual(cfg.Shedding.PriorityPaths.Low, []string{"/api/analytics"}) {
+		t.Errorf("expected shedding low paths ['/api/analytics'], got %v", cfg.Shedding.PriorityPaths.Low)
+	}
 }
 
 func TestValidate_ExtendedRouteFields(t *testing.T) {
@@ -496,6 +553,357 @@ func TestValidate_RateLimit(t *testing.T) {
 				}
 			},
 			wantErrText: "rate_limit.refill_per_second",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := parseValidFixture(t)
+			tt.mutate(cfg)
+
+			err := cfg.Validate()
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("expected valid configuration, got: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErrText)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("expected error to contain %q, got: %v", tt.wantErrText, err)
+			}
+		})
+	}
+}
+
+func TestValidate_Reliability(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(*config.Config)
+		wantErrText string
+	}{
+		{
+			name: "valid reliability config",
+			mutate: func(c *config.Config) {
+				c.Reliability = config.ReliabilityConfig{
+					BreakerFailureThreshold: 5,
+					BreakerCooldown:         config.Duration(30 * time.Second),
+					RetryEnabled:            true,
+					RetryMaxAttempts:        3,
+					RetryInitialDelay:       config.Duration(100 * time.Millisecond),
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "breaker_failure_threshold less than 1",
+			mutate: func(c *config.Config) {
+				c.Reliability = config.ReliabilityConfig{
+					BreakerFailureThreshold: 0,
+					BreakerCooldown:         config.Duration(30 * time.Second),
+				}
+			},
+			wantErrText: "reliability.breaker_failure_threshold",
+		},
+		{
+			name: "breaker_cooldown non-positive",
+			mutate: func(c *config.Config) {
+				c.Reliability = config.ReliabilityConfig{
+					BreakerFailureThreshold: 5,
+					BreakerCooldown:         0,
+				}
+			},
+			wantErrText: "reliability.breaker_cooldown",
+		},
+		{
+			name: "retry_max_attempts less than 1 when retry enabled",
+			mutate: func(c *config.Config) {
+				c.Reliability = config.ReliabilityConfig{
+					BreakerFailureThreshold: 5,
+					BreakerCooldown:         config.Duration(30 * time.Second),
+					RetryEnabled:            true,
+					RetryMaxAttempts:        0,
+					RetryInitialDelay:       config.Duration(100 * time.Millisecond),
+				}
+			},
+			wantErrText: "reliability.retry_max_attempts",
+		},
+		{
+			name: "retry_initial_delay non-positive when retry enabled",
+			mutate: func(c *config.Config) {
+				c.Reliability = config.ReliabilityConfig{
+					BreakerFailureThreshold: 5,
+					BreakerCooldown:         config.Duration(30 * time.Second),
+					RetryEnabled:            true,
+					RetryMaxAttempts:        3,
+					RetryInitialDelay:       0,
+				}
+			},
+			wantErrText: "reliability.retry_initial_delay",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := parseValidFixture(t)
+			tt.mutate(cfg)
+
+			err := cfg.Validate()
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("expected valid configuration, got: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErrText)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("expected error to contain %q, got: %v", tt.wantErrText, err)
+			}
+		})
+	}
+}
+
+func TestValidate_Queue(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(*config.Config)
+		wantErrText string
+	}{
+		{
+			name: "valid enabled queue config",
+			mutate: func(c *config.Config) {
+				c.Queue = config.QueueConfig{
+					Enabled:       true,
+					MaxInflight:   200,
+					MaxQueueDepth: 1000,
+					CodelTarget:   config.Duration(100 * time.Millisecond),
+					CodelInterval: config.Duration(time.Second),
+					PriorityPaths: config.PriorityPathsConfig{
+						High: []string{"/api/payments"},
+						Low:  []string{"/api/analytics"},
+					},
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "disabled queue ignores zero fields",
+			mutate: func(c *config.Config) {
+				c.Queue = config.QueueConfig{
+					Enabled: false,
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "enabled queue with max_inflight zero",
+			mutate: func(c *config.Config) {
+				c.Queue = config.QueueConfig{
+					Enabled:       true,
+					MaxInflight:   0,
+					MaxQueueDepth: 1000,
+					CodelTarget:   config.Duration(100 * time.Millisecond),
+					CodelInterval: config.Duration(time.Second),
+				}
+			},
+			wantErrText: "queue.max_inflight",
+		},
+		{
+			name: "enabled queue with max_queue_depth zero",
+			mutate: func(c *config.Config) {
+				c.Queue = config.QueueConfig{
+					Enabled:       true,
+					MaxInflight:   200,
+					MaxQueueDepth: 0,
+					CodelTarget:   config.Duration(100 * time.Millisecond),
+					CodelInterval: config.Duration(time.Second),
+				}
+			},
+			wantErrText: "queue.max_queue_depth",
+		},
+		{
+			name: "enabled queue with codel_target zero",
+			mutate: func(c *config.Config) {
+				c.Queue = config.QueueConfig{
+					Enabled:       true,
+					MaxInflight:   200,
+					MaxQueueDepth: 1000,
+					CodelTarget:   0,
+					CodelInterval: config.Duration(time.Second),
+				}
+			},
+			wantErrText: "queue.codel_target",
+		},
+		{
+			name: "enabled queue with codel_interval zero",
+			mutate: func(c *config.Config) {
+				c.Queue = config.QueueConfig{
+					Enabled:       true,
+					MaxInflight:   200,
+					MaxQueueDepth: 1000,
+					CodelTarget:   config.Duration(100 * time.Millisecond),
+					CodelInterval: 0,
+				}
+			},
+			wantErrText: "queue.codel_interval",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := parseValidFixture(t)
+			tt.mutate(cfg)
+
+			err := cfg.Validate()
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("expected valid configuration, got: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErrText)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("expected error to contain %q, got: %v", tt.wantErrText, err)
+			}
+		})
+	}
+}
+
+func TestValidate_Shedding(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(c *config.Config)
+		wantErrText string
+	}{
+		{
+			name: "disabled shedding with zero values is valid",
+			mutate: func(c *config.Config) {
+				c.Shedding = config.SheddingConfig{
+					Enabled: false,
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "enabled shedding with valid fields",
+			mutate: func(c *config.Config) {
+				c.Shedding = config.SheddingConfig{
+					Enabled:        true,
+					TargetP99:      config.Duration(500 * time.Millisecond),
+					MinAdmitRate:   0.05,
+					AdjustInterval: config.Duration(time.Second),
+					PriorityPaths: config.PriorityPathsConfig{
+						High: []string{"/api/payments"},
+						Low:  []string{"/api/analytics"},
+					},
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "enabled shedding with zero target_p99",
+			mutate: func(c *config.Config) {
+				c.Shedding = config.SheddingConfig{
+					Enabled:        true,
+					TargetP99:      0,
+					MinAdmitRate:   0.05,
+					AdjustInterval: config.Duration(time.Second),
+				}
+			},
+			wantErrText: "shedding.target_p99",
+		},
+		{
+			name: "enabled shedding with negative target_p99",
+			mutate: func(c *config.Config) {
+				c.Shedding = config.SheddingConfig{
+					Enabled:        true,
+					TargetP99:      config.Duration(-10 * time.Millisecond),
+					MinAdmitRate:   0.05,
+					AdjustInterval: config.Duration(time.Second),
+				}
+			},
+			wantErrText: "shedding.target_p99",
+		},
+		{
+			name: "enabled shedding with zero min_admit_rate",
+			mutate: func(c *config.Config) {
+				c.Shedding = config.SheddingConfig{
+					Enabled:        true,
+					TargetP99:      config.Duration(500 * time.Millisecond),
+					MinAdmitRate:   0.0,
+					AdjustInterval: config.Duration(time.Second),
+				}
+			},
+			wantErrText: "shedding.min_admit_rate",
+		},
+		{
+			name: "enabled shedding with negative min_admit_rate",
+			mutate: func(c *config.Config) {
+				c.Shedding = config.SheddingConfig{
+					Enabled:        true,
+					TargetP99:      config.Duration(500 * time.Millisecond),
+					MinAdmitRate:   -0.1,
+					AdjustInterval: config.Duration(time.Second),
+				}
+			},
+			wantErrText: "shedding.min_admit_rate",
+		},
+		{
+			name: "enabled shedding with min_admit_rate 1.0",
+			mutate: func(c *config.Config) {
+				c.Shedding = config.SheddingConfig{
+					Enabled:        true,
+					TargetP99:      config.Duration(500 * time.Millisecond),
+					MinAdmitRate:   1.0,
+					AdjustInterval: config.Duration(time.Second),
+				}
+			},
+			wantErrText: "shedding.min_admit_rate",
+		},
+		{
+			name: "enabled shedding with min_admit_rate greater than 1.0",
+			mutate: func(c *config.Config) {
+				c.Shedding = config.SheddingConfig{
+					Enabled:        true,
+					TargetP99:      config.Duration(500 * time.Millisecond),
+					MinAdmitRate:   1.2,
+					AdjustInterval: config.Duration(time.Second),
+				}
+			},
+			wantErrText: "shedding.min_admit_rate",
+		},
+		{
+			name: "enabled shedding with zero adjust_interval",
+			mutate: func(c *config.Config) {
+				c.Shedding = config.SheddingConfig{
+					Enabled:        true,
+					TargetP99:      config.Duration(500 * time.Millisecond),
+					MinAdmitRate:   0.05,
+					AdjustInterval: 0,
+				}
+			},
+			wantErrText: "shedding.adjust_interval",
+		},
+		{
+			name: "enabled shedding with negative adjust_interval",
+			mutate: func(c *config.Config) {
+				c.Shedding = config.SheddingConfig{
+					Enabled:        true,
+					TargetP99:      config.Duration(500 * time.Millisecond),
+					MinAdmitRate:   0.05,
+					AdjustInterval: config.Duration(-time.Second),
+				}
+			},
+			wantErrText: "shedding.adjust_interval",
 		},
 	}
 

@@ -19,7 +19,10 @@ import (
 	"github.com/syncronix-labs/aegora/internal/config"
 	"github.com/syncronix-labs/aegora/internal/middleware"
 	"github.com/syncronix-labs/aegora/internal/proxy"
+	"github.com/syncronix-labs/aegora/internal/queue"
 	"github.com/syncronix-labs/aegora/internal/ratelimit"
+	"github.com/syncronix-labs/aegora/internal/reliability"
+	"github.com/syncronix-labs/aegora/internal/shedding"
 )
 
 // toProxyRoutes maps config.RouteConfig definitions into proxy.RouteConfig structures.
@@ -127,21 +130,82 @@ func buildRateLimitMiddleware(cfg config.RateLimitConfig) middleware.Middleware 
 //  3. AccessLog: Positioned after RequestID to capture the assigned request_id, and
 //     measure exact routing and handler execution latency while capturing the final HTTP status code.
 //  4. RateLimit (optional): Positioned between AccessLog and the mux/gateway to enforce
-//     per-key rate limits while ensuring rejected requests (429) are logged by AccessLog
-//     with assigned request IDs.
-func buildHandler(cfg *config.Config, logger *slog.Logger) (http.Handler, error) {
-	gwRoutes := toProxyRoutes(cfg.Routes)
-	gw, err := proxy.NewGateway(gwRoutes)
-	if err != nil {
-		return nil, fmt.Errorf("build gateway: %w", err)
+//
+// toReliabilityConfig maps config.ReliabilityConfig to proxy.ReliabilityConfig with sensible defaults.
+func toReliabilityConfig(cfg config.ReliabilityConfig) proxy.ReliabilityConfig {
+	threshold := cfg.BreakerFailureThreshold
+	if threshold <= 0 {
+		threshold = 5
 	}
 
-	mux := buildMux(gw)
+	cooldown := cfg.BreakerCooldown.Duration()
+	if cooldown <= 0 {
+		cooldown = 30 * time.Second
+	}
+
+	attempts := cfg.RetryMaxAttempts
+	if attempts <= 0 {
+		attempts = 3
+	}
+
+	initialDelay := cfg.RetryInitialDelay.Duration()
+	if initialDelay <= 0 {
+		initialDelay = 100 * time.Millisecond
+	}
+
+	return proxy.ReliabilityConfig{
+		BreakerFailureThreshold: threshold,
+		BreakerCooldown:         cooldown,
+		BreakerHalfOpenProbes:   2,
+		BreakerSuccessThreshold: 2,
+		RetryEnabled:            cfg.RetryEnabled,
+		RetryPolicy: reliability.RetryPolicy{
+			MaxAttempts:  attempts,
+			InitialDelay: initialDelay,
+			MaxDelay:     2 * time.Second,
+			Multiplier:   2.0,
+			Jitter:       1.0,
+		},
+	}
+}
+
+// buildApp constructs the HTTP handler wrapped with the middleware chain and optional admission queue.
+func buildApp(cfg *config.Config, logger *slog.Logger) (http.Handler, *queue.Queue, error) {
+	gwRoutes := toProxyRoutes(cfg.Routes)
+	rc := toReliabilityConfig(cfg.Reliability)
+	gw, err := proxy.NewGateway(gwRoutes, rc)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build gateway: %w", err)
+	}
+
+	var gwHandler http.Handler = gw
+	var q *queue.Queue
+	if cfg.Queue.Enabled {
+		cd := queue.NewCodel(cfg.Queue.CodelTarget.Duration(), cfg.Queue.CodelInterval.Duration())
+		q = queue.NewQueue(cfg.Queue.MaxInflight, cfg.Queue.MaxQueueDepth, cd, cfg.Queue.PriorityPaths.High, cfg.Queue.PriorityPaths.Low)
+		gwHandler = q.Admit(gw)
+	}
+
+	mux := buildMux(gwHandler)
 
 	mws := []middleware.Middleware{
 		middleware.Recovery(logger),
 		middleware.RequestID,
 		middleware.AccessLog(logger),
+	}
+
+	// Adaptive load shedding: shed globally before spending per-key rate-limit
+	// budget or queue capacity. When overloaded, dropping traffic early prevents
+	// starvation of client token buckets and unnecessary queue contention.
+	if cfg.Shedding.Enabled {
+		sc := shedding.NewController(
+			cfg.Shedding.TargetP99.Duration(),
+			cfg.Shedding.AdjustInterval.Duration(),
+			cfg.Shedding.MinAdmitRate,
+			cfg.Shedding.PriorityPaths.High,
+			cfg.Shedding.PriorityPaths.Low,
+		)
+		mws = append(mws, sc.Admit)
 	}
 
 	if cfg.RateLimit.Enabled {
@@ -150,7 +214,37 @@ func buildHandler(cfg *config.Config, logger *slog.Logger) (http.Handler, error)
 
 	chain := middleware.New(mws...)
 
-	return chain.Then(mux), nil
+	return chain.Then(mux), q, nil
+}
+
+// buildHandler constructs the HTTP handler wrapped with the middleware chain.
+//
+// Middleware chain ordering rationale:
+//  1. Recovery (outermost): Must wrap the entire chain so that any panic originating
+//     in downstream middleware or handlers is caught, logged with stack traces, and
+//     converted to a clean 500 JSON response without crashing the server.
+//  2. RequestID: Must execute before AccessLog and the handlers so that an X-Request-ID
+//     is generated/extracted and added to the request context early, making it available
+//     to both the access logger and all downstream business logic.
+//  3. AccessLog: Positioned after RequestID to capture the assigned request_id, and
+//     measure exact routing and handler execution latency while capturing the final HTTP status code.
+//  4. Load Shedding (optional): Positioned immediately after AccessLog and before RateLimit to shed
+//     globally before spending per-key rate-limit budget or queue capacity.
+//  5. RateLimit (optional): Positioned between Load Shedding and the mux/gateway to enforce
+//     per-key rate limits while ensuring rejected requests (429) are logged by AccessLog
+//     with assigned request IDs.
+//  6. Queue Admission (optional): Positioned between RateLimit and the upstream gateway to enforce
+//     concurrency limits and CoDel bufferbloat drops on traffic routed to backend targets, while
+//     bypassing /livez and /readyz health probes.
+func buildHandler(cfg *config.Config, logger *slog.Logger) (http.Handler, error) {
+	h, q, err := buildApp(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	if q != nil {
+		q.Start()
+	}
+	return h, nil
 }
 
 // isCLITestRun detects if the binary was invoked by the repository integration test runner.
@@ -188,10 +282,13 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 
-	handler, err := buildHandler(cfg, logger)
+	handler, q, err := buildApp(cfg, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error building handler: %v\n", err)
 		os.Exit(1)
+	}
+	if q != nil {
+		q.Start()
 	}
 
 	server := &http.Server{
@@ -205,6 +302,9 @@ func main() {
 	logger.Info("Aegora starting...", slog.String("addr", cfg.Server.Addr))
 
 	if isCLITestRun() {
+		if q != nil {
+			q.Stop()
+		}
 		return
 	}
 
@@ -225,6 +325,10 @@ func main() {
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+
+		if q != nil {
+			q.Stop()
+		}
 
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			logger.Error("shutdown error", slog.String("error", err.Error()))

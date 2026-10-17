@@ -2,11 +2,15 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
+
+	"github.com/syncronix-labs/aegora/internal/reliability"
 )
 
 type contextKey int
@@ -21,13 +25,29 @@ type upstreamInfo struct {
 }
 
 type routeEntry struct {
-	config RouteConfig
-	pool   *Pool
-	proxy  *httputil.ReverseProxy
+	config  RouteConfig
+	pool    *Pool
+	proxy   *httputil.ReverseProxy
+	breaker *reliability.CircuitBreaker
+}
+
+// ReliabilityConfig specifies circuit breaker and retry policies for the gateway.
+//
+// Architectural distinction:
+// - pool: tracks per-target connectivity for individual upstream server instances.
+// - breaker: tracks per-route service health across the entire route to prevent cascading failures.
+type ReliabilityConfig struct {
+	BreakerFailureThreshold int
+	BreakerCooldown         time.Duration
+	BreakerHalfOpenProbes   int
+	BreakerSuccessThreshold int
+	RetryEnabled            bool
+	RetryPolicy             reliability.RetryPolicy
 }
 
 // Gateway routes incoming HTTP requests to upstream server pools via reverse proxies,
-// enforcing route matching, path prefix stripping, load balancing, and failure handling.
+// enforcing route matching, path prefix stripping, load balancing, circuit breaking,
+// automatic retries, and failure handling.
 type Gateway struct {
 	router *Router
 	routes map[*RouteConfig]*routeEntry
@@ -35,10 +55,39 @@ type Gateway struct {
 
 // NewGateway constructs a Gateway with a compiled Router, one upstream Pool per route,
 // and one reverse proxy per route utilizing Aegora's header sanitization and HTTP transport.
-func NewGateway(routes []RouteConfig) (*Gateway, error) {
+// Each route is configured with its own CircuitBreaker and, if enabled, a RetryTransport.
+func NewGateway(routes []RouteConfig, rc ReliabilityConfig) (*Gateway, error) {
+	if rc.BreakerFailureThreshold <= 0 {
+		return nil, errors.New("gateway: breaker failure threshold must be positive")
+	}
+	if rc.BreakerCooldown <= 0 {
+		return nil, errors.New("gateway: breaker cooldown must be positive")
+	}
+	if rc.BreakerHalfOpenProbes <= 0 {
+		return nil, errors.New("gateway: breaker half-open probes must be positive")
+	}
+	if rc.BreakerSuccessThreshold <= 0 {
+		return nil, errors.New("gateway: breaker success threshold must be positive")
+	}
+	if rc.RetryEnabled {
+		if err := rc.RetryPolicy.Validate(); err != nil {
+			return nil, fmt.Errorf("gateway: retry policy: %w", err)
+		}
+	}
+
 	router, err := NewRouter(routes)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: router init: %w", err)
+	}
+
+	// RetryTransport may be shared across routes since it is stateless beyond its policy.
+	// When retry is disabled, BreakerTransport chains directly over NewTransport().
+	var baseTransport http.RoundTripper = NewTransport()
+	if rc.RetryEnabled {
+		baseTransport = &reliability.RetryTransport{
+			Base:   baseTransport,
+			Policy: rc.RetryPolicy,
+		}
 	}
 
 	routeMap := make(map[*RouteConfig]*routeEntry, len(router.routes))
@@ -50,6 +99,21 @@ func NewGateway(routes []RouteConfig) (*Gateway, error) {
 			return nil, fmt.Errorf("gateway: route %q pool init: %w", r.Name, err)
 		}
 
+		// Breakers must be per-route instances to track service health independently.
+		breaker := reliability.NewCircuitBreaker(
+			rc.BreakerFailureThreshold,
+			rc.BreakerCooldown,
+			rc.BreakerHalfOpenProbes,
+			rc.BreakerSuccessThreshold,
+		)
+
+		// Breaker sits outside retry: if open, it fails fast without wasting retries.
+		// The retry loop's final outcome (exhausted attempts or failure) is what the breaker records.
+		routeTransport := &reliability.BreakerTransport{
+			Base:    baseTransport,
+			Breaker: breaker,
+		}
+
 		proxy := newReverseProxy(
 			func(pr *httputil.ProxyRequest) {
 				pr.SetURL(&url.URL{
@@ -58,22 +122,26 @@ func NewGateway(routes []RouteConfig) (*Gateway, error) {
 				})
 				sanitizeHeaders(pr)
 			},
-			func(w http.ResponseWriter, req *http.Request, _ error) {
+			func(w http.ResponseWriter, req *http.Request, err error) {
+				if errors.Is(err, reliability.ErrCircuitOpen) {
+					writeJSONError(w, http.StatusServiceUnavailable, `{"error":"service unavailable"}`)
+					return
+				}
 				if info, ok := req.Context().Value(upstreamContextKey).(*upstreamInfo); ok && info != nil {
 					if info.pool != nil {
 						info.pool.ReportFailure(info.index)
 					}
 				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadGateway)
-				_, _ = w.Write([]byte(`{"error":"bad gateway"}`))
+				writeJSONError(w, http.StatusBadGateway, `{"error":"bad gateway"}`)
 			},
 		)
+		proxy.Transport = routeTransport
 
 		routeMap[r] = &routeEntry{
-			config: *r,
-			pool:   pool,
-			proxy:  proxy,
+			config:  *r,
+			pool:    pool,
+			proxy:   proxy,
+			breaker: breaker,
 		}
 	}
 

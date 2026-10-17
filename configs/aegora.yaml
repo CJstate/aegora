@@ -31,3 +31,29 @@ rate_limit:
   window: "1m"
   key: "ip"
 
+reliability:
+  breaker_failure_threshold: 5
+  breaker_cooldown: "30s"
+  retry_enabled: true
+  retry_max_attempts: 3
+  retry_initial_delay: "100ms"
+
+queue:
+  enabled: false
+  max_inflight: 200
+  max_queue_depth: 1000
+  codel_target: "100ms"
+  codel_interval: "1s"
+  priority_paths:
+    high: ["/api/payments"]
+    low: ["/api/analytics"]
+
+shedding:
+  enabled: false
+  target_p99: "500ms"
+  min_admit_rate: 0.05
+  adjust_interval: "1s"
+  priority_paths:
+    high: ["/api/payments"]
+    low: ["/api/analytics"]
+
