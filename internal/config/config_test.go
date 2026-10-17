@@ -434,6 +434,16 @@ func TestLoad_SampleDevConfig(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Shedding.PriorityPaths.Low, []string{"/api/analytics"}) {
 		t.Errorf("expected shedding low paths ['/api/analytics'], got %v", cfg.Shedding.PriorityPaths.Low)
 	}
+
+	if cfg.Cache.TTL.Duration() != 60*time.Second {
+		t.Errorf("expected cache.ttl = 60s, got %s", cfg.Cache.TTL)
+	}
+	if cfg.Cache.MaxEntries != 10000 {
+		t.Errorf("expected cache.max_entries = 10000, got %d", cfg.Cache.MaxEntries)
+	}
+	if cfg.Cache.MaxBodyBytes != 1048576 {
+		t.Errorf("expected cache.max_body_bytes = 1048576, got %d", cfg.Cache.MaxBodyBytes)
+	}
 }
 
 func TestValidate_ExtendedRouteFields(t *testing.T) {
@@ -904,6 +914,130 @@ func TestValidate_Shedding(t *testing.T) {
 				}
 			},
 			wantErrText: "shedding.adjust_interval",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := parseValidFixture(t)
+			tt.mutate(cfg)
+
+			err := cfg.Validate()
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("expected valid configuration, got: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErrText)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("expected error to contain %q, got: %v", tt.wantErrText, err)
+			}
+		})
+	}
+}
+
+func TestValidate_Cache(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(c *config.Config)
+		wantErrText string
+	}{
+		{
+			name: "disabled cache with zero values is valid",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled: false,
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "enabled cache with valid fields",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled:      true,
+					TTL:          config.Duration(60 * time.Second),
+					MaxEntries:   10000,
+					MaxBodyBytes: 1048576,
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "enabled cache with zero ttl",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled:      true,
+					TTL:          0,
+					MaxEntries:   10000,
+					MaxBodyBytes: 1048576,
+				}
+			},
+			wantErrText: "cache.ttl",
+		},
+		{
+			name: "enabled cache with negative ttl",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled:      true,
+					TTL:          config.Duration(-time.Minute),
+					MaxEntries:   10000,
+					MaxBodyBytes: 1048576,
+				}
+			},
+			wantErrText: "cache.ttl",
+		},
+		{
+			name: "enabled cache with zero max_entries",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled:      true,
+					TTL:          config.Duration(60 * time.Second),
+					MaxEntries:   0,
+					MaxBodyBytes: 1048576,
+				}
+			},
+			wantErrText: "cache.max_entries",
+		},
+		{
+			name: "enabled cache with negative max_entries",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled:      true,
+					TTL:          config.Duration(60 * time.Second),
+					MaxEntries:   -100,
+					MaxBodyBytes: 1048576,
+				}
+			},
+			wantErrText: "cache.max_entries",
+		},
+		{
+			name: "enabled cache with zero max_body_bytes",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled:      true,
+					TTL:          config.Duration(60 * time.Second),
+					MaxEntries:   10000,
+					MaxBodyBytes: 0,
+				}
+			},
+			wantErrText: "cache.max_body_bytes",
+		},
+		{
+			name: "enabled cache with negative max_body_bytes",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled:      true,
+					TTL:          config.Duration(60 * time.Second),
+					MaxEntries:   10000,
+					MaxBodyBytes: -512,
+				}
+			},
+			wantErrText: "cache.max_body_bytes",
 		},
 	}
 

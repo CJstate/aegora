@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -509,6 +510,84 @@ func TestBuildHandler_Shedding(t *testing.T) {
 	}
 
 	// 2. Health checks pass through without issue
+	recLivez := httptest.NewRecorder()
+	reqLivez := httptest.NewRequest(http.MethodGet, "/livez", nil)
+	handler.ServeHTTP(recLivez, reqLivez)
+	if recLivez.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /livez, got %d", recLivez.Code)
+	}
+}
+
+func TestBuildHandler_Cache(t *testing.T) {
+	var backendHits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"cached":true}`))
+	}))
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:         "127.0.0.1:8080",
+			ReadTimeout:  config.Duration(15 * time.Second),
+			WriteTimeout: config.Duration(15 * time.Second),
+			IdleTimeout:  config.Duration(30 * time.Second),
+		},
+		Routes: []config.RouteConfig{
+			{
+				Name:       "cached-route",
+				PathPrefix: "/api",
+				Targets:    []string{backend.URL},
+			},
+		},
+		Observability: config.ObservabilityConfig{
+			LogLevel: "info",
+		},
+		Cache: config.CacheConfig{
+			Enabled:      true,
+			TTL:          config.Duration(60 * time.Second),
+			MaxEntries:   100,
+			MaxBodyBytes: 1024 * 1024,
+		},
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildHandler: %v", err)
+	}
+
+	// First GET: miss, backend called
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodGet, "/api/resource", nil)
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", rec1.Code)
+	}
+	if rec1.Header().Get("X-Cache") != "MISS" {
+		t.Fatalf("expected X-Cache MISS, got %q", rec1.Header().Get("X-Cache"))
+	}
+	if backendHits.Load() != 1 {
+		t.Fatalf("expected 1 backend hit, got %d", backendHits.Load())
+	}
+
+	// Second GET: hit, backend NOT called
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/api/resource", nil)
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want 200", rec2.Code)
+	}
+	if rec2.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("expected X-Cache HIT, got %q", rec2.Header().Get("X-Cache"))
+	}
+	if backendHits.Load() != 1 {
+		t.Fatalf("expected backend hits to remain 1 after cache hit, got %d", backendHits.Load())
+	}
+
+	// Health check bypasses cache and returns 200
 	recLivez := httptest.NewRecorder()
 	reqLivez := httptest.NewRequest(http.MethodGet, "/livez", nil)
 	handler.ServeHTTP(recLivez, reqLivez)

@@ -54,6 +54,15 @@ type Config struct {
 	Reliability   ReliabilityConfig   `yaml:"reliability,omitempty"`
 	Queue         QueueConfig         `yaml:"queue,omitempty"`
 	Shedding      SheddingConfig      `yaml:"shedding,omitempty"`
+	Cache         CacheConfig         `yaml:"cache,omitempty"`
+}
+
+// CacheConfig configures in-memory response caching for GET and HEAD requests.
+type CacheConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	TTL          Duration `yaml:"ttl,omitempty"`
+	MaxEntries   int      `yaml:"max_entries,omitempty"`
+	MaxBodyBytes int      `yaml:"max_body_bytes,omitempty"`
 }
 
 // SheddingConfig configures adaptive load shedding with an AIMD controller.
@@ -334,6 +343,18 @@ func (c *Config) Validate() error {
 		}
 		if c.Shedding.AdjustInterval <= 0 {
 			return fmt.Errorf("config: shedding.adjust_interval: must be positive, got %s", c.Shedding.AdjustInterval)
+		}
+	}
+
+	if c.Cache.Enabled {
+		if c.Cache.TTL <= 0 {
+			return fmt.Errorf("config: cache.ttl: must be positive, got %s", c.Cache.TTL)
+		}
+		if c.Cache.MaxEntries <= 0 {
+			return fmt.Errorf("config: cache.max_entries: must be positive, got %d", c.Cache.MaxEntries)
+		}
+		if c.Cache.MaxBodyBytes <= 0 {
+			return fmt.Errorf("config: cache.max_body_bytes: must be positive, got %d", c.Cache.MaxBodyBytes)
 		}
 	}
 

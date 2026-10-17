@@ -57,3 +57,10 @@ shedding:
     high: ["/api/payments"]
     low: ["/api/analytics"]
 
+cache:
+  enabled: false
+  ttl: "60s"
+  max_entries: 10000
+  max_body_bytes: 1048576
+
+
