@@ -22,8 +22,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"go.opentelemetry.io/otel/trace"
 	"github.com/syncronix-labs/aegora/internal/admin"
 	"github.com/syncronix-labs/aegora/internal/cache"
 	"github.com/syncronix-labs/aegora/internal/config"
@@ -35,6 +33,8 @@ import (
 	"github.com/syncronix-labs/aegora/internal/reliability"
 	"github.com/syncronix-labs/aegora/internal/shedding"
 	"github.com/syncronix-labs/aegora/internal/tracing"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // toProxyRoutes maps config.RouteConfig definitions into proxy.RouteConfig structures.

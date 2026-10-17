@@ -1389,5 +1389,3 @@ func TestValidate_Admin(t *testing.T) {
 		})
 	}
 }
-
-

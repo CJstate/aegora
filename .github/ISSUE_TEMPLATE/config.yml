@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation and Architecture Guides
+    url: https://github.com/syncronix-labs/aegora/tree/main/docs
+    about: Consult docs/configuration.md and docs/architecture.md for detailed reference material and design rationales.
+  - name: Usage and Configuration Questions
+    url: https://github.com/syncronix-labs/aegora/issues/new?labels=question&title=question:%20
+    about: Ask setup and usage questions on GitHub Issues using the question label.
+  - name: Security Vulnerability Reporting
+    url: https://github.com/syncronix-labs/aegora/blob/main/SECURITY.md
+    about: Please report security vulnerabilities privately. Do not open public issues for security exploits.
