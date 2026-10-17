@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,7 +38,10 @@ func newTestConfig() *config.Config {
 func TestBuildHandler_EndpointsAndMiddleware(t *testing.T) {
 	cfg := newTestConfig()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	handler := buildHandler(cfg, logger)
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildHandler: %v", err)
+	}
 
 	tests := []struct {
 		name         string
@@ -74,18 +78,18 @@ func TestBuildHandler_EndpointsAndMiddleware(t *testing.T) {
 			wantStatus: http.StatusMethodNotAllowed,
 		},
 		{
-			name:       "GET /unknown returns 501 Not Implemented",
+			name:       "GET /unknown returns 404 Not Found",
 			method:     http.MethodGet,
 			path:       "/unknown",
-			wantStatus: http.StatusNotImplemented,
-			wantBody:   `{"error":"not implemented"}`,
+			wantStatus: http.StatusNotFound,
+			wantBody:   `{"error":"no route matched"}`,
 		},
 		{
-			name:       "POST /api/v1/users returns 501 Not Implemented",
+			name:       "POST /other returns 404 Not Found",
 			method:     http.MethodPost,
-			path:       "/api/v1/users",
-			wantStatus: http.StatusNotImplemented,
-			wantBody:   `{"error":"not implemented"}`,
+			path:       "/other",
+			wantStatus: http.StatusNotFound,
+			wantBody:   `{"error":"no route matched"}`,
 		},
 	}
 
@@ -119,7 +123,10 @@ func TestBuildHandler_EndpointsAndMiddleware(t *testing.T) {
 func TestBuildHandler_PropagatesExistingRequestID(t *testing.T) {
 	cfg := newTestConfig()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	handler := buildHandler(cfg, logger)
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildHandler: %v", err)
+	}
 
 	const incomingID = "custom-client-id-abc"
 	rec := httptest.NewRecorder()
@@ -134,6 +141,102 @@ func TestBuildHandler_PropagatesExistingRequestID(t *testing.T) {
 
 	if got := rec.Header().Get("X-Request-ID"); got != incomingID {
 		t.Fatalf("expected echoed X-Request-ID %q, got %q", incomingID, got)
+	}
+}
+
+func TestBuildHandler_MultiBackendRoutingAndStripPrefix(t *testing.T) {
+	var backend1Path, backend2Path string
+	var mu sync.Mutex
+
+	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		backend1Path = r.URL.Path
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"backend":"1"}`))
+	}))
+	defer backend1.Close()
+
+	backend2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		backend2Path = r.URL.Path
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"backend":"2"}`))
+	}))
+	defer backend2.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:         "127.0.0.1:8080",
+			ReadTimeout:  config.Duration(15 * time.Second),
+			WriteTimeout: config.Duration(15 * time.Second),
+			IdleTimeout:  config.Duration(30 * time.Second),
+		},
+		Routes: []config.RouteConfig{
+			{
+				Name:        "users-route",
+				PathPrefix:  "/users",
+				Targets:     []string{backend1.URL},
+				StripPrefix: "/users",
+			},
+			{
+				Name:        "orders-route",
+				PathPrefix:  "/orders",
+				Targets:     []string{backend2.URL},
+				StripPrefix: "/orders",
+			},
+		},
+		Observability: config.ObservabilityConfig{
+			LogLevel:    "info",
+			MetricsAddr: "127.0.0.1:9090",
+		},
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildHandler: %v", err)
+	}
+
+	// 1. Request to /users/profile lands on backend 1 and strip prefix yields /profile
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodGet, "/users/profile", nil)
+	handler.ServeHTTP(rec1, req1)
+
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", rec1.Code, rec1.Body.String())
+	}
+	if rec1.Body.String() != `{"backend":"1"}` {
+		t.Fatalf("expected backend 1 response, got %s", rec1.Body.String())
+	}
+
+	mu.Lock()
+	gotPath1 := backend1Path
+	mu.Unlock()
+	if gotPath1 != "/profile" {
+		t.Fatalf("expected stripped path /profile on backend 1, got %q", gotPath1)
+	}
+
+	// 2. Request to /orders/42 lands on backend 2 and strip prefix yields /42
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/orders/42", nil)
+	handler.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", rec2.Code, rec2.Body.String())
+	}
+	if rec2.Body.String() != `{"backend":"2"}` {
+		t.Fatalf("expected backend 2 response, got %s", rec2.Body.String())
+	}
+
+	mu.Lock()
+	gotPath2 := backend2Path
+	mu.Unlock()
+	if gotPath2 != "/42" {
+		t.Fatalf("expected stripped path /42 on backend 2, got %q", gotPath2)
 	}
 }
 
@@ -172,7 +275,10 @@ func TestBuildHandler_AccessLogging(t *testing.T) {
 	cfg := newTestConfig()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	handler := buildHandler(cfg, logger)
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildHandler: %v", err)
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/livez", nil)
