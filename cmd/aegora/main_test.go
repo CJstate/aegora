@@ -456,3 +456,63 @@ func TestBuildHandler_QueueAdmission(t *testing.T) {
 		t.Fatalf("expected 200 for /api/priority/pay, got %d", rec2.Code)
 	}
 }
+
+func TestBuildHandler_Shedding(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"proxied"}`))
+	}))
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:         "127.0.0.1:8080",
+			ReadTimeout:  config.Duration(15 * time.Second),
+			WriteTimeout: config.Duration(15 * time.Second),
+			IdleTimeout:  config.Duration(30 * time.Second),
+		},
+		Routes: []config.RouteConfig{
+			{
+				Name:       "api-route",
+				PathPrefix: "/api",
+				Targets:    []string{backend.URL},
+			},
+		},
+		Observability: config.ObservabilityConfig{
+			LogLevel: "info",
+		},
+		Shedding: config.SheddingConfig{
+			Enabled:        true,
+			TargetP99:      config.Duration(500 * time.Millisecond),
+			MinAdmitRate:   0.05,
+			AdjustInterval: config.Duration(time.Second),
+			PriorityPaths: config.PriorityPathsConfig{
+				High: []string{"/api/payments"},
+				Low:  []string{"/api/analytics"},
+			},
+		},
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildHandler: %v", err)
+	}
+
+	// 1. Initial requests pass through since initial admitRate is 1.0
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	// 2. Health checks pass through without issue
+	recLivez := httptest.NewRecorder()
+	reqLivez := httptest.NewRequest(http.MethodGet, "/livez", nil)
+	handler.ServeHTTP(recLivez, reqLivez)
+	if recLivez.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /livez, got %d", recLivez.Code)
+	}
+}

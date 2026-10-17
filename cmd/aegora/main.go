@@ -22,6 +22,7 @@ import (
 	"github.com/syncronix-labs/aegora/internal/queue"
 	"github.com/syncronix-labs/aegora/internal/ratelimit"
 	"github.com/syncronix-labs/aegora/internal/reliability"
+	"github.com/syncronix-labs/aegora/internal/shedding"
 )
 
 // toProxyRoutes maps config.RouteConfig definitions into proxy.RouteConfig structures.
@@ -193,6 +194,20 @@ func buildApp(cfg *config.Config, logger *slog.Logger) (http.Handler, *queue.Que
 		middleware.AccessLog(logger),
 	}
 
+	// Adaptive load shedding: shed globally before spending per-key rate-limit
+	// budget or queue capacity. When overloaded, dropping traffic early prevents
+	// starvation of client token buckets and unnecessary queue contention.
+	if cfg.Shedding.Enabled {
+		sc := shedding.NewController(
+			cfg.Shedding.TargetP99.Duration(),
+			cfg.Shedding.AdjustInterval.Duration(),
+			cfg.Shedding.MinAdmitRate,
+			cfg.Shedding.PriorityPaths.High,
+			cfg.Shedding.PriorityPaths.Low,
+		)
+		mws = append(mws, sc.Admit)
+	}
+
 	if cfg.RateLimit.Enabled {
 		mws = append(mws, buildRateLimitMiddleware(cfg.RateLimit))
 	}
@@ -213,10 +228,12 @@ func buildApp(cfg *config.Config, logger *slog.Logger) (http.Handler, *queue.Que
 //     to both the access logger and all downstream business logic.
 //  3. AccessLog: Positioned after RequestID to capture the assigned request_id, and
 //     measure exact routing and handler execution latency while capturing the final HTTP status code.
-//  4. RateLimit (optional): Positioned between AccessLog and the mux/gateway to enforce
+//  4. Load Shedding (optional): Positioned immediately after AccessLog and before RateLimit to shed
+//     globally before spending per-key rate-limit budget or queue capacity.
+//  5. RateLimit (optional): Positioned between Load Shedding and the mux/gateway to enforce
 //     per-key rate limits while ensuring rejected requests (429) are logged by AccessLog
 //     with assigned request IDs.
-//  5. Queue Admission (optional): Positioned between RateLimit and the upstream gateway to enforce
+//  6. Queue Admission (optional): Positioned between RateLimit and the upstream gateway to enforce
 //     concurrency limits and CoDel bufferbloat drops on traffic routed to backend targets, while
 //     bypassing /livez and /readyz health probes.
 func buildHandler(cfg *config.Config, logger *slog.Logger) (http.Handler, error) {

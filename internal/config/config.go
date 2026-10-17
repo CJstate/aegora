@@ -53,6 +53,18 @@ type Config struct {
 	RateLimit     RateLimitConfig     `yaml:"rate_limit,omitempty"`
 	Reliability   ReliabilityConfig   `yaml:"reliability,omitempty"`
 	Queue         QueueConfig         `yaml:"queue,omitempty"`
+	Shedding      SheddingConfig      `yaml:"shedding,omitempty"`
+}
+
+// SheddingConfig configures adaptive load shedding with an AIMD controller.
+// Note: priority_paths may be shared with the queue section in a future unified
+// classification model; for now, each section owns its independent copy.
+type SheddingConfig struct {
+	Enabled        bool                `yaml:"enabled"`
+	TargetP99      Duration            `yaml:"target_p99,omitempty"`
+	MinAdmitRate   float64             `yaml:"min_admit_rate,omitempty"`
+	AdjustInterval Duration            `yaml:"adjust_interval,omitempty"`
+	PriorityPaths  PriorityPathsConfig `yaml:"priority_paths,omitempty"`
 }
 
 // PriorityPathsConfig configures path prefixes mapped to request priorities.
@@ -310,6 +322,18 @@ func (c *Config) Validate() error {
 		}
 		if c.Queue.CodelInterval <= 0 {
 			return fmt.Errorf("config: queue.codel_interval: must be positive, got %s", c.Queue.CodelInterval)
+		}
+	}
+
+	if c.Shedding.Enabled {
+		if c.Shedding.TargetP99 <= 0 {
+			return fmt.Errorf("config: shedding.target_p99: must be positive, got %s", c.Shedding.TargetP99)
+		}
+		if c.Shedding.MinAdmitRate <= 0.0 || c.Shedding.MinAdmitRate >= 1.0 {
+			return fmt.Errorf("config: shedding.min_admit_rate: must be between 0.0 and 1.0 (exclusive), got %f", c.Shedding.MinAdmitRate)
+		}
+		if c.Shedding.AdjustInterval <= 0 {
+			return fmt.Errorf("config: shedding.adjust_interval: must be positive, got %s", c.Shedding.AdjustInterval)
 		}
 	}
 
