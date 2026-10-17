@@ -12,7 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,6 +24,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
+	"github.com/syncronix-labs/aegora/internal/admin"
 	"github.com/syncronix-labs/aegora/internal/cache"
 	"github.com/syncronix-labs/aegora/internal/config"
 	"github.com/syncronix-labs/aegora/internal/metrics"
@@ -344,6 +348,156 @@ func buildHandlerWithRegistry(cfg *config.Config, logger *slog.Logger, reg *prom
 	return h, nil
 }
 
+// gatewayReloader coordinates dynamic configuration reloads and atomic handler swaps.
+//
+// Atomic Swap Design:
+// Aegora serves traffic through an atomic.Pointer[http.Handler] behind a root HTTP handler.
+// During reload:
+//  1. The new configuration file is loaded from disk and strictly validated. If any error occurs,
+//     Reload immediately aborts, leaving the active handler and configuration completely untouched.
+//  2. A new router, target pools, reliability layers, and middleware chain are compiled in memory.
+//     If compilation succeeds, the new queue dispatcher is started.
+//  3. handlerPtr.Store atomically replaces the active handler pointer. In-flight requests currently
+//     executing on the old chain finish against their original pools and breaker states, while
+//     all new incoming requests immediately dispatch through the new chain.
+//  4. Slog logging levels are dynamically adjusted via the shared LevelVar.
+//
+// Known Limitation:
+// Hot reload rebuilds upstream target pools and route breaker instances. Consequently, per-route
+// circuit breaker health metrics reset (new pools start closed with clean failure counters).
+// Active in-flight requests running on the previous handler chain are unaffected.
+type gatewayReloader struct {
+	configPath    string
+	logger        *slog.Logger
+	reg           *prometheus.Registry
+	logLevelVar   *slog.LevelVar
+	mu            sync.Mutex
+	currentConfig atomic.Pointer[config.Config]
+	handlerPtr    atomic.Pointer[http.Handler]
+	queuePtr      atomic.Pointer[queue.Queue]
+}
+
+func newGatewayReloader(
+	configPath string,
+	initialCfg *config.Config,
+	initialHandler http.Handler,
+	initialQ *queue.Queue,
+	logger *slog.Logger,
+	reg *prometheus.Registry,
+	levelVar *slog.LevelVar,
+) *gatewayReloader {
+	r := &gatewayReloader{
+		configPath:  configPath,
+		logger:      logger,
+		reg:         reg,
+		logLevelVar: levelVar,
+	}
+	r.currentConfig.Store(initialCfg)
+	r.handlerPtr.Store(&initialHandler)
+	r.queuePtr.Store(initialQ)
+	return r
+}
+
+func (r *gatewayReloader) RootHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		h := r.handlerPtr.Load()
+		if h == nil || *h == nil {
+			http.Error(w, `{"error":"gateway unavailable"}`, http.StatusServiceUnavailable)
+			return
+		}
+		(*h).ServeHTTP(w, req)
+	})
+}
+
+func (r *gatewayReloader) Reload() ([]string, []string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	newCfg, err := config.Load(r.configPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("config reload: %w", err)
+	}
+
+	newHandler, newQ, _, _, err := buildAppWithRegistry(newCfg, r.logger, r.reg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("rebuild gateway: %w", err)
+	}
+
+	if newQ != nil {
+		newQ.Start()
+	}
+
+	// Atomically swap the serving handler
+	r.handlerPtr.Store(&newHandler)
+
+	oldQ := r.queuePtr.Swap(newQ)
+	if oldQ != nil {
+		oldQ.Stop()
+	}
+
+	// Update slog level dynamically
+	if newLvl, err := parseLogLevel(newCfg.Observability.LogLevel); err == nil && r.logLevelVar != nil {
+		r.logLevelVar.Set(newLvl)
+	}
+
+	oldCfg := r.currentConfig.Load()
+	applied, skipped := computeAppliedAndSkipped(oldCfg, newCfg)
+
+	r.currentConfig.Store(newCfg)
+
+	return applied, skipped, nil
+}
+
+func computeAppliedAndSkipped(oldCfg, newCfg *config.Config) ([]string, []string) {
+	applied := make([]string, 0)
+	skipped := make([]string, 0)
+
+	if oldCfg == nil {
+		return applied, skipped
+	}
+
+	// Sections that take effect on reload
+	if !reflect.DeepEqual(oldCfg.Routes, newCfg.Routes) {
+		applied = append(applied, "routes")
+	}
+	if !reflect.DeepEqual(oldCfg.RateLimit, newCfg.RateLimit) {
+		applied = append(applied, "rate_limit")
+	}
+	if !reflect.DeepEqual(oldCfg.Queue, newCfg.Queue) {
+		applied = append(applied, "queue")
+	}
+	if !reflect.DeepEqual(oldCfg.Cache, newCfg.Cache) {
+		applied = append(applied, "cache")
+	}
+	if !reflect.DeepEqual(oldCfg.Shedding, newCfg.Shedding) {
+		applied = append(applied, "shedding")
+	}
+	if oldCfg.Observability.LogLevel != newCfg.Observability.LogLevel {
+		applied = append(applied, "log_level")
+	}
+	if !reflect.DeepEqual(oldCfg.Reliability, newCfg.Reliability) {
+		applied = append(applied, "reliability")
+	}
+
+	// Sections that require a process restart to take effect
+	if oldCfg.Server.Addr != newCfg.Server.Addr {
+		skipped = append(skipped, "server addr")
+	}
+	if oldCfg.Observability.MetricsAddr != newCfg.Observability.MetricsAddr {
+		skipped = append(skipped, "metrics addr")
+	}
+	if oldCfg.Admin.Addr != newCfg.Admin.Addr {
+		skipped = append(skipped, "admin addr")
+	}
+	if oldCfg.Observability.Tracing.Exporter != newCfg.Observability.Tracing.Exporter ||
+		oldCfg.Observability.Tracing.Enabled != newCfg.Observability.Tracing.Enabled ||
+		oldCfg.Observability.Tracing.OTLPEndpoint != newCfg.Observability.Tracing.OTLPEndpoint {
+		skipped = append(skipped, "tracing exporter")
+	}
+
+	return applied, skipped
+}
+
 // isCLITestRun detects if the binary was invoked by the repository integration test runner.
 func isCLITestRun() bool {
 	ppidOut, err := exec.Command("ps", "-o", "ppid=", "-p", fmt.Sprintf("%d", os.Getppid())).Output()
@@ -377,7 +531,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+	levelVar := &slog.LevelVar{}
+	levelVar.Set(lvl)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: levelVar}))
 
 	handler, q, reg, tracingShutdown, err := buildAppWithRegistry(cfg, logger, nil)
 	if err != nil {
@@ -388,9 +544,11 @@ func main() {
 		q.Start()
 	}
 
+	reloader := newGatewayReloader(configPath, cfg, handler, q, logger, reg, levelVar)
+
 	server := &http.Server{
 		Addr:         cfg.Server.Addr,
-		Handler:      handler,
+		Handler:      reloader.RootHandler(),
 		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout),
 		WriteTimeout: time.Duration(cfg.Server.WriteTimeout),
 		IdleTimeout:  time.Duration(cfg.Server.IdleTimeout),
@@ -416,6 +574,39 @@ func main() {
 		}()
 	}
 
+	routesFn := func() []admin.RouteInfo {
+		activeCfg := reloader.currentConfig.Load()
+		if activeCfg == nil {
+			return []admin.RouteInfo{}
+		}
+		infos := make([]admin.RouteInfo, len(activeCfg.Routes))
+		for i, r := range activeCfg.Routes {
+			infos[i] = admin.RouteInfo{
+				Name:       r.Name,
+				PathPrefix: r.PathPrefix,
+				PathRegex:  r.PathRegex,
+				Targets:    r.Targets,
+				LBPolicy:   r.LB,
+			}
+		}
+		return infos
+	}
+
+	configFn := func() admin.ConfigSnapshot {
+		return reloader.currentConfig.Load()
+	}
+
+	var adminServer *admin.Server
+	if cfg.Admin.Enabled {
+		adminServer = admin.NewServer(cfg.Admin.Addr, reloader, configFn, routesFn)
+		logger.Info("admin server starting...", slog.String("addr", cfg.Admin.Addr))
+		go func() {
+			if err := adminServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("admin server error", slog.String("error", err.Error()))
+			}
+		}()
+	}
+
 	logger.Info("Aegora starting...", slog.String("addr", cfg.Server.Addr))
 
 	if isCLITestRun() {
@@ -424,6 +615,9 @@ func main() {
 		}
 		if metricsServer != nil {
 			_ = metricsServer.Close()
+		}
+		if adminServer != nil {
+			_ = adminServer.Close()
 		}
 		if tracingShutdown != nil {
 			_ = tracingShutdown(context.Background())
@@ -447,6 +641,9 @@ func main() {
 			if metricsServer != nil {
 				_ = metricsServer.Close()
 			}
+			if adminServer != nil {
+				_ = adminServer.Close()
+			}
 			if tracingShutdown != nil {
 				_ = tracingShutdown(context.Background())
 			}
@@ -462,6 +659,12 @@ func main() {
 		if metricsServer != nil {
 			if err := metricsServer.Shutdown(shutdownCtx); err != nil {
 				logger.Error("metrics server shutdown error", slog.String("error", err.Error()))
+			}
+		}
+
+		if adminServer != nil {
+			if err := adminServer.Shutdown(shutdownCtx); err != nil {
+				logger.Error("admin server shutdown error", slog.String("error", err.Error()))
 			}
 		}
 

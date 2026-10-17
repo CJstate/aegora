@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +19,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/syncronix-labs/aegora/internal/admin"
 	"github.com/syncronix-labs/aegora/internal/config"
 )
 
@@ -884,5 +888,393 @@ func TestBuildHandler_OpenTelemetryTracing(t *testing.T) {
 		t.Errorf("expected propagated traceparent %q to contain parent trace ID %q", receivedTraceparent, parentTraceID)
 	}
 }
+
+func TestHotReload_ValidConfigSwap(t *testing.T) {
+	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("backend1 response"))
+	}))
+	defer backend1.Close()
+
+	backend2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("backend2 response"))
+	}))
+	defer backend2.Close()
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "aegora.yaml")
+
+	initialYAML := fmt.Sprintf(`
+server:
+  addr: "127.0.0.1:8080"
+  read_timeout: "15s"
+  write_timeout: "15s"
+  idle_timeout: "30s"
+routes:
+  - name: "route-one"
+    path_prefix: "/r1"
+    targets:
+      - "%s"
+observability:
+  log_level: "info"
+  metrics_addr: "127.0.0.1:9090"
+admin:
+  enabled: true
+  addr: "127.0.0.1:9091"
+`, backend1.URL)
+
+	if err := os.WriteFile(configPath, []byte(initialYAML), 0o600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	lvl, err := parseLogLevel(cfg.Observability.LogLevel)
+	if err != nil {
+		t.Fatalf("parseLogLevel: %v", err)
+	}
+	levelVar := &slog.LevelVar{}
+	levelVar.Set(lvl)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: levelVar}))
+
+	handler, q, reg, _, err := buildAppWithRegistry(cfg, logger, nil)
+	if err != nil {
+		t.Fatalf("buildAppWithRegistry: %v", err)
+	}
+	if q != nil {
+		q.Start()
+	}
+
+	reloader := newGatewayReloader(configPath, cfg, handler, q, logger, reg, levelVar)
+	rootHandler := reloader.RootHandler()
+
+	routesFn := func() []admin.RouteInfo {
+		activeCfg := reloader.currentConfig.Load()
+		if activeCfg == nil {
+			return []admin.RouteInfo{}
+		}
+		infos := make([]admin.RouteInfo, len(activeCfg.Routes))
+		for i, r := range activeCfg.Routes {
+			infos[i] = admin.RouteInfo{
+				Name:       r.Name,
+				PathPrefix: r.PathPrefix,
+				PathRegex:  r.PathRegex,
+				Targets:    r.Targets,
+				LBPolicy:   r.LB,
+			}
+		}
+		return infos
+	}
+
+	configFn := func() admin.ConfigSnapshot {
+		return reloader.currentConfig.Load()
+	}
+
+	adminSrv := admin.NewServer(cfg.Admin.Addr, reloader, configFn, routesFn)
+	adminHandler := adminSrv.Handler()
+
+	// 1. Verify before reload:
+	// GET /r1/test -> 200 from backend1
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodGet, "/r1/test", nil)
+	rootHandler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK || rec1.Body.String() != "backend1 response" {
+		t.Fatalf("expected 200 backend1 response, got %d %q", rec1.Code, rec1.Body.String())
+	}
+
+	// GET /r2/test -> 404 (route does not exist yet)
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/r2/test", nil)
+	rootHandler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unconfigured /r2, got %d", rec2.Code)
+	}
+
+	// Check routesFn output before reload
+	initialRoutes := routesFn()
+	if len(initialRoutes) != 1 || initialRoutes[0].Name != "route-one" {
+		t.Fatalf("expected 1 route named 'route-one', got %+v", initialRoutes)
+	}
+
+	// 2. Modify config on disk to replace route-one with route-two and change log_level to debug
+	updatedYAML := fmt.Sprintf(`
+server:
+  addr: "127.0.0.1:8080"
+  read_timeout: "15s"
+  write_timeout: "15s"
+  idle_timeout: "30s"
+routes:
+  - name: "route-two"
+    path_prefix: "/r2"
+    targets:
+      - "%s"
+observability:
+  log_level: "debug"
+  metrics_addr: "127.0.0.1:9090"
+admin:
+  enabled: true
+  addr: "127.0.0.1:9091"
+`, backend2.URL)
+
+	if err := os.WriteFile(configPath, []byte(updatedYAML), 0o600); err != nil {
+		t.Fatalf("write updated config: %v", err)
+	}
+
+	// Trigger reload via admin POST /admin/reload
+	reloadRec := httptest.NewRecorder()
+	reloadReq := httptest.NewRequest(http.MethodPost, "/admin/reload", nil)
+	adminHandler.ServeHTTP(reloadRec, reloadReq)
+
+	if reloadRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /admin/reload, got %d: %s", reloadRec.Code, reloadRec.Body.String())
+	}
+
+	var reloadResp struct {
+		Reloaded bool     `json:"reloaded"`
+		Applied  []string `json:"applied"`
+		Skipped  []string `json:"skipped"`
+	}
+	if err := json.Unmarshal(reloadRec.Body.Bytes(), &reloadResp); err != nil {
+		t.Fatalf("unmarshal reload resp: %v", err)
+	}
+
+	if !reloadResp.Reloaded {
+		t.Errorf("expected reloaded = true")
+	}
+
+	// Verify log level updated dynamically
+	if levelVar.Level() != slog.LevelDebug {
+		t.Errorf("expected levelVar updated to debug, got %v", levelVar.Level())
+	}
+
+	// 3. Verify after reload:
+	// New route appears in routesFn output
+	updatedRoutes := routesFn()
+	if len(updatedRoutes) != 1 || updatedRoutes[0].Name != "route-two" {
+		t.Fatalf("expected 1 route named 'route-two', got %+v", updatedRoutes)
+	}
+
+	// Traffic to /r2/test now succeeds through swapped handler!
+	recNew := httptest.NewRecorder()
+	reqNew := httptest.NewRequest(http.MethodGet, "/r2/test", nil)
+	rootHandler.ServeHTTP(recNew, reqNew)
+	if recNew.Code != http.StatusOK || recNew.Body.String() != "backend2 response" {
+		t.Fatalf("expected 200 backend2 response after reload, got %d %q", recNew.Code, recNew.Body.String())
+	}
+
+	// Old route /r1/test now returns 404
+	recOld := httptest.NewRecorder()
+	reqOld := httptest.NewRequest(http.MethodGet, "/r1/test", nil)
+	rootHandler.ServeHTTP(recOld, reqOld)
+	if recOld.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for old route after reload, got %d", recOld.Code)
+	}
+
+	// 4. Verify admin endpoints: /admin/health, /admin/routes, /admin/config
+	healthRec := httptest.NewRecorder()
+	adminHandler.ServeHTTP(healthRec, httptest.NewRequest(http.MethodGet, "/admin/health", nil))
+	if healthRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /admin/health, got %d", healthRec.Code)
+	}
+	var healthData map[string]string
+	if err := json.Unmarshal(healthRec.Body.Bytes(), &healthData); err != nil || healthData["status"] != "ok" {
+		t.Fatalf("invalid /admin/health payload: %v", healthData)
+	}
+
+	routesRec := httptest.NewRecorder()
+	adminHandler.ServeHTTP(routesRec, httptest.NewRequest(http.MethodGet, "/admin/routes", nil))
+	if routesRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /admin/routes, got %d", routesRec.Code)
+	}
+	var adminRoutes []admin.RouteInfo
+	if err := json.Unmarshal(routesRec.Body.Bytes(), &adminRoutes); err != nil || len(adminRoutes) != 1 || adminRoutes[0].Name != "route-two" {
+		t.Fatalf("invalid /admin/routes payload: %v", adminRoutes)
+	}
+
+	cfgRec := httptest.NewRecorder()
+	adminHandler.ServeHTTP(cfgRec, httptest.NewRequest(http.MethodGet, "/admin/config", nil))
+	if cfgRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /admin/config, got %d", cfgRec.Code)
+	}
+	var returnedCfg config.Config
+	if err := json.Unmarshal(cfgRec.Body.Bytes(), &returnedCfg); err != nil || len(returnedCfg.Routes) != 1 || returnedCfg.Routes[0].Name != "route-two" {
+		t.Fatalf("invalid /admin/config payload: %v", returnedCfg)
+	}
+}
+
+func TestHotReload_InvalidConfigAtomicity(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("backend response"))
+	}))
+	defer backend.Close()
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "aegora.yaml")
+
+	validYAML := fmt.Sprintf(`
+server:
+  addr: "127.0.0.1:8080"
+  read_timeout: "15s"
+  write_timeout: "15s"
+  idle_timeout: "30s"
+routes:
+  - name: "stable-route"
+    path_prefix: "/stable"
+    targets:
+      - "%s"
+observability:
+  log_level: "info"
+  metrics_addr: "127.0.0.1:9090"
+`, backend.URL)
+
+	if err := os.WriteFile(configPath, []byte(validYAML), 0o600); err != nil {
+		t.Fatalf("write valid config: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, q, reg, _, err := buildAppWithRegistry(cfg, logger, nil)
+	if err != nil {
+		t.Fatalf("buildAppWithRegistry: %v", err)
+	}
+
+	reloader := newGatewayReloader(configPath, cfg, handler, q, logger, reg, nil)
+	rootHandler := reloader.RootHandler()
+
+	// Initial request succeeds
+	rec1 := httptest.NewRecorder()
+	rootHandler.ServeHTTP(rec1, httptest.NewRequest(http.MethodGet, "/stable/item", nil))
+	if rec1.Code != http.StatusOK || rec1.Body.String() != "backend response" {
+		t.Fatalf("expected 200 before bad reload, got %d %q", rec1.Code, rec1.Body.String())
+	}
+
+	// Corrupt config file: routes empty (violates Validate requirement of at least 1 route)
+	invalidYAML := `
+server:
+  addr: "127.0.0.1:8080"
+  read_timeout: "15s"
+  write_timeout: "15s"
+  idle_timeout: "30s"
+routes: []
+observability:
+  log_level: "info"
+  metrics_addr: "127.0.0.1:9090"
+`
+	if err := os.WriteFile(configPath, []byte(invalidYAML), 0o600); err != nil {
+		t.Fatalf("write invalid config: %v", err)
+	}
+
+	// Trigger reload -> must return error
+	applied, skipped, err := reloader.Reload()
+	if err == nil {
+		t.Fatalf("expected reload to fail on invalid config, got nil (applied: %v, skipped: %v)", applied, skipped)
+	}
+
+	// Prove ATOMICITY: old handler and route still serve successfully!
+	rec2 := httptest.NewRecorder()
+	rootHandler.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/stable/item", nil))
+	if rec2.Code != http.StatusOK || rec2.Body.String() != "backend response" {
+		t.Fatalf("expected 200 after failed reload (atomicity preserved), got %d %q", rec2.Code, rec2.Body.String())
+	}
+}
+
+func TestHotReload_SkippedRestartRequired(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "aegora.yaml")
+
+	baseYAML := `
+server:
+  addr: "127.0.0.1:8080"
+  read_timeout: "15s"
+  write_timeout: "15s"
+  idle_timeout: "30s"
+routes:
+  - name: "r1"
+    path_prefix: "/r1"
+    targets:
+      - "http://127.0.0.1:8081"
+observability:
+  log_level: "info"
+  metrics_addr: "127.0.0.1:9090"
+  tracing:
+    enabled: true
+    exporter: "stdout"
+    sample_ratio: 1.0
+admin:
+  enabled: true
+  addr: "127.0.0.1:9091"
+`
+	if err := os.WriteFile(configPath, []byte(baseYAML), 0o600); err != nil {
+		t.Fatalf("write base config: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, q, reg, _, err := buildAppWithRegistry(cfg, logger, nil)
+	if err != nil {
+		t.Fatalf("buildAppWithRegistry: %v", err)
+	}
+
+	reloader := newGatewayReloader(configPath, cfg, handler, q, logger, reg, nil)
+
+	// Change restart-required sections: server.addr, metrics_addr, admin.addr, tracing exporter
+	changedYAML := `
+server:
+  addr: "127.0.0.1:8888"
+  read_timeout: "15s"
+  write_timeout: "15s"
+  idle_timeout: "30s"
+routes:
+  - name: "r1"
+    path_prefix: "/r1"
+    targets:
+      - "http://127.0.0.1:8081"
+observability:
+  log_level: "info"
+  metrics_addr: "127.0.0.1:9990"
+  tracing:
+    enabled: true
+    exporter: "otlp"
+    otlp_endpoint: "localhost:4318"
+    sample_ratio: 1.0
+admin:
+  enabled: true
+  addr: "127.0.0.1:9991"
+`
+	if err := os.WriteFile(configPath, []byte(changedYAML), 0o600); err != nil {
+		t.Fatalf("write changed config: %v", err)
+	}
+
+	_, skipped, err := reloader.Reload()
+	if err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+
+	skippedMap := make(map[string]bool)
+	for _, s := range skipped {
+		skippedMap[s] = true
+	}
+
+	expectedSkipped := []string{"server addr", "metrics addr", "admin addr", "tracing exporter"}
+	for _, exp := range expectedSkipped {
+		if !skippedMap[exp] {
+			t.Errorf("expected skipped to contain %q, got: %v", exp, skipped)
+		}
+	}
+}
+
 
 
