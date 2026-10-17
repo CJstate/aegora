@@ -19,6 +19,7 @@ import (
 	"github.com/syncronix-labs/aegora/internal/config"
 	"github.com/syncronix-labs/aegora/internal/middleware"
 	"github.com/syncronix-labs/aegora/internal/proxy"
+	"github.com/syncronix-labs/aegora/internal/ratelimit"
 )
 
 // toProxyRoutes maps config.RouteConfig definitions into proxy.RouteConfig structures.
@@ -85,6 +86,35 @@ func buildMux(gw http.Handler) *http.ServeMux {
 	return mux
 }
 
+// buildRateLimitMiddleware constructs the rate-limiting middleware based on configuration.
+func buildRateLimitMiddleware(cfg config.RateLimitConfig) middleware.Middleware {
+	var limiterFactory func() ratelimit.Limiter
+	switch cfg.Limiter {
+	case "token_bucket":
+		capacity := cfg.MaxRequests
+		refill := cfg.RefillPerSecond
+		limiterFactory = func() ratelimit.Limiter {
+			return ratelimit.NewTokenBucket(capacity, refill)
+		}
+	default:
+		window := cfg.Window.Duration()
+		maxReqs := cfg.MaxRequests
+		limiterFactory = func() ratelimit.Limiter {
+			return ratelimit.NewSlidingWindow(window, maxReqs)
+		}
+	}
+
+	var keyFn middleware.KeyFunc
+	switch cfg.Key {
+	case "api_key":
+		keyFn = middleware.APIKey
+	default:
+		keyFn = middleware.IPKey
+	}
+
+	return middleware.RateLimit(limiterFactory, keyFn, []string{"/livez", "/readyz"})
+}
+
 // buildHandler constructs the HTTP handler wrapped with the middleware chain.
 //
 // Middleware chain ordering rationale:
@@ -95,8 +125,10 @@ func buildMux(gw http.Handler) *http.ServeMux {
 //     is generated/extracted and added to the request context early, making it available
 //     to both the access logger and all downstream business logic.
 //  3. AccessLog: Positioned after RequestID to capture the assigned request_id, and
-//     immediately wraps the ServeMux to measure exact routing and handler execution
-//     latency while capturing the final HTTP status code.
+//     measure exact routing and handler execution latency while capturing the final HTTP status code.
+//  4. RateLimit (optional): Positioned between AccessLog and the mux/gateway to enforce
+//     per-key rate limits while ensuring rejected requests (429) are logged by AccessLog
+//     with assigned request IDs.
 func buildHandler(cfg *config.Config, logger *slog.Logger) (http.Handler, error) {
 	gwRoutes := toProxyRoutes(cfg.Routes)
 	gw, err := proxy.NewGateway(gwRoutes)
@@ -106,11 +138,17 @@ func buildHandler(cfg *config.Config, logger *slog.Logger) (http.Handler, error)
 
 	mux := buildMux(gw)
 
-	chain := middleware.New(
+	mws := []middleware.Middleware{
 		middleware.Recovery(logger),
 		middleware.RequestID,
 		middleware.AccessLog(logger),
-	)
+	}
+
+	if cfg.RateLimit.Enabled {
+		mws = append(mws, buildRateLimitMiddleware(cfg.RateLimit))
+	}
+
+	chain := middleware.New(mws...)
 
 	return chain.Then(mux), nil
 }

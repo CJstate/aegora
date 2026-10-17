@@ -50,6 +50,17 @@ type Config struct {
 	Server        ServerConfig        `yaml:"server"`
 	Routes        []RouteConfig       `yaml:"routes"`
 	Observability ObservabilityConfig `yaml:"observability"`
+	RateLimit     RateLimitConfig     `yaml:"rate_limit,omitempty"`
+}
+
+// RateLimitConfig configures gateway request rate limiting behavior.
+type RateLimitConfig struct {
+	Enabled         bool     `yaml:"enabled"`
+	Limiter         string   `yaml:"limiter,omitempty"`
+	MaxRequests     int      `yaml:"max_requests,omitempty"`
+	Window          Duration `yaml:"window,omitempty"`
+	RefillPerSecond float64  `yaml:"refill_per_second,omitempty"`
+	Key             string   `yaml:"key,omitempty"`
 }
 
 // ServerConfig holds HTTP server network and timeout settings.
@@ -216,6 +227,28 @@ func (c *Config) Validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("config: observability.log_level: must be one of debug, info, warn, error; got %q", c.Observability.LogLevel)
+	}
+
+	if c.RateLimit.Enabled {
+		if c.RateLimit.MaxRequests <= 0 {
+			return fmt.Errorf("config: rate_limit.max_requests: must be positive, got %d", c.RateLimit.MaxRequests)
+		}
+
+		if c.RateLimit.Limiter != "sliding_window" && c.RateLimit.Limiter != "token_bucket" {
+			return fmt.Errorf("config: rate_limit.limiter: must be one of sliding_window, token_bucket; got %q", c.RateLimit.Limiter)
+		}
+
+		if c.RateLimit.Key != "ip" && c.RateLimit.Key != "api_key" {
+			return fmt.Errorf("config: rate_limit.key: must be one of ip, api_key; got %q", c.RateLimit.Key)
+		}
+
+		if c.RateLimit.Limiter == "sliding_window" && c.RateLimit.Window <= 0 {
+			return fmt.Errorf("config: rate_limit.window: must be positive for sliding_window, got %s", c.RateLimit.Window)
+		}
+
+		if c.RateLimit.Limiter == "token_bucket" && c.RateLimit.RefillPerSecond <= 0 {
+			return fmt.Errorf("config: rate_limit.refill_per_second: must be positive for token_bucket, got %f", c.RateLimit.RefillPerSecond)
+		}
 	}
 
 	return nil

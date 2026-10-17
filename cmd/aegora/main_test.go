@@ -290,3 +290,95 @@ func TestBuildHandler_AccessLogging(t *testing.T) {
 		t.Fatal("expected access log output, got empty")
 	}
 }
+
+func TestBuildHandler_RateLimiting(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"proxied"}`))
+	}))
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:         "127.0.0.1:8080",
+			ReadTimeout:  config.Duration(15 * time.Second),
+			WriteTimeout: config.Duration(15 * time.Second),
+			IdleTimeout:  config.Duration(30 * time.Second),
+		},
+		Routes: []config.RouteConfig{
+			{
+				Name:       "api-route",
+				PathPrefix: "/api",
+				Targets:    []string{backend.URL},
+			},
+		},
+		Observability: config.ObservabilityConfig{
+			LogLevel: "info",
+		},
+		RateLimit: config.RateLimitConfig{
+			Enabled:     true,
+			Limiter:     "sliding_window",
+			MaxRequests: 2,
+			Window:      config.Duration(time.Minute),
+			Key:         "ip",
+		},
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildHandler: %v", err)
+	}
+
+	// 1st request -> 200 OK
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	req1.RemoteAddr = "192.168.1.50:1234"
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("request 1 expected 200, got %d", rec1.Code)
+	}
+
+	// 2nd request -> 200 OK
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	req2.RemoteAddr = "192.168.1.50:1234"
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("request 2 expected 200, got %d", rec2.Code)
+	}
+
+	// 3rd (N+1th) rapid request -> 429 Too Many Requests
+	rec3 := httptest.NewRecorder()
+	req3 := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	req3.RemoteAddr = "192.168.1.50:1234"
+	handler.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusTooManyRequests {
+		t.Fatalf("N+1th request expected 429, got %d", rec3.Code)
+	}
+
+	if limit := rec3.Header().Get("X-RateLimit-Limit"); limit != "2" {
+		t.Fatalf("expected X-RateLimit-Limit '2', got %q", limit)
+	}
+	if rem := rec3.Header().Get("X-RateLimit-Remaining"); rem != "0" {
+		t.Fatalf("expected X-RateLimit-Remaining '0', got %q", rem)
+	}
+	if retryAfter := rec3.Header().Get("Retry-After"); retryAfter == "" {
+		t.Fatalf("expected Retry-After header, got empty")
+	}
+	if body := rec3.Body.String(); body != `{"error":"rate limit exceeded"}` {
+		t.Fatalf("expected body %q, got %q", `{"error":"rate limit exceeded"}`, body)
+	}
+
+	// Verify that /livez is never limited, even when client is rate-limited
+	for i := 0; i < 5; i++ {
+		recLivez := httptest.NewRecorder()
+		reqLivez := httptest.NewRequest(http.MethodGet, "/livez", nil)
+		reqLivez.RemoteAddr = "192.168.1.50:1234"
+		handler.ServeHTTP(recLivez, reqLivez)
+		if recLivez.Code != http.StatusOK {
+			t.Fatalf("/livez call %d expected 200, got %d", i+1, recLivez.Code)
+		}
+	}
+}
