@@ -1,103 +1,60 @@
 # Aegora
 
+[![CI](https://github.com/syncronix-labs/aegora/actions/workflows/ci.yml/badge.svg)](https://github.com/syncronix-labs/aegora/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/syncronix-labs/aegora)](https://github.com/syncronix-labs/aegora/blob/main/go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Go Layer 7 reliability gateway.
 
-Aegora is a high-throughput HTTP/1.1 reverse proxy and reliability gateway built with Go 1.25. It protects upstream microservices from overload, cascading failures, latency spikes, and traffic surges through defensive middleware, multi-tier caching, dynamic queueing, adaptive load shedding, and real-time observability.
+Aegora is an HTTP/1.1 reverse proxy and reliability gateway built in Go. It protects upstream services from overload, cascading failures, latency spikes, and traffic surges through defensive middleware, multi-tier caching, dynamic queueing, adaptive load shedding, and observability.
 
 ---
 
 ## Features
 
 ### Routing
-- **Flexible Path Matching**: Prefix-based and regular expression route matching with method and header constraints.
-- **Load Balancing**: Round-robin and least-connections upstream server pool dispatching.
-- **Passive Health Checking**: Automatic circuit-level target fault detection and recovery.
-- **Path Rewriting**: Optional path prefix stripping before forwarding to upstream targets.
+- **Path Matching**: Prefix and regex route matching with HTTP method and header constraints.
+- **Load Balancing**: Round-robin and least-connections upstream selection.
+- **Passive Health Checking**: Target failure detection with automatic recovery.
+- **Path Rewriting**: Optional prefix stripping before forwarding to upstreams.
 
 ### Resilience
-- **Rate Limiting**: Sliding window and token bucket limiters configurable by client IP or API key, with standalone in-memory operation or distributed Redis synchronization.
-- **Circuit Breaker**: Per-route failure tracking with closed, open, and half-open state machines to isolate unhealthy backends.
-- **Retry with Backoff**: Automatic retry policies for idempotent HTTP requests with exponential backoff and decorrelated full jitter.
-- **Priority Queues**: Multi-level admission queues (high, normal, low) based on request path rules and `X-Priority` headers.
-- **CoDel Active Queue Management**: Controlled Delay drop logic to prevent bufferbloat under sustained connection spikes.
-- **Adaptive Load Shedding**: AIMD (Additive Increase / Multiplicative Decrease) controller dynamically throttling lower-priority traffic when P99 latency violates target thresholds.
+- **Rate Limiting**: Sliding window and token bucket limiters by client IP or API key, with in-memory or Redis backends.
+- **Circuit Breaker**: Closed, open, and half-open state machine per route.
+- **Retry Policies**: Idempotent request retries with exponential backoff and full jitter.
+- **Priority Queues**: Multi-level admission queues (high, normal, low) via path rules or `X-Priority` headers.
+- **CoDel Active Queue Management**: Controlled Delay drop logic to mitigate bufferbloat.
+- **Adaptive Load Shedding**: AIMD controller throttling lower-priority traffic when P99 latency exceeds target.
 
 ### Performance
-- **Multi-Tier Caching**: High-speed L1 in-memory response caching paired with distributed L2 Redis storage.
-- **Conditional Validation**: Automatic `ETag` generation and `If-None-Match` 304 Not Modified evaluation.
-- **Safe Cache Semantics**: Automatic exclusion of requests with `Authorization` headers, `no-store` directives, or `Set-Cookie` responses.
+- **Multi-Tier Caching**: In-memory L1 cache with distributed Redis L2 storage.
+- **Conditional Validation**: `ETag` generation and `If-None-Match` 304 evaluation.
+- **Safe Cache Semantics**: Automatic bypass on `Authorization`, `no-store`, or `Set-Cookie`.
 
 ### Observability
-- **Prometheus Telemetry**: Dedicated `/metrics` endpoint implementing the RED method (Request rate, Error count, Duration histograms, and current Inflight gauges).
-- **OpenTelemetry Tracing**: Distributed tracing with W3C tracecontext propagation, stdout or OTLP exporters, and parent-based sampling.
-- **Structured Logging**: Context-aware `log/slog` output capturing request IDs, HTTP status codes, routing latency, and client details.
+- **Prometheus Metrics**: `/metrics` endpoint with RED method counters, duration histograms, and inflight gauges.
+- **OpenTelemetry Tracing**: W3C tracecontext propagation with stdout or OTLP exporters and configurable sampling.
+- **Structured Logging**: `log/slog` output with request IDs, status codes, latency, and client details.
 
 ### Operations
-- **Dedicated Admin API**: Management server running on an isolated network port (`9091`) with endpoints for health checks, route inspection, and runtime configuration queries.
-- **Zero-Downtime Hot Reload**: Atomic configuration reload triggered via HTTP POST without dropping active connections.
-- **Container Packaging**: Lightweight multi-stage Docker image and ready-to-run Docker Compose environment.
+- **Admin API**: Dedicated HTTP listener on port `9091` for health checks, route queries, and configuration snapshots.
+- **Hot Reload**: Atomic configuration reload via `POST /admin/reload` without dropping connections.
+- **Container Packaging**: Multi-stage Dockerfile and Docker Compose environment.
 
 ---
 
 ## Architecture
 
-Aegora sits between external clients and internal backend services. Requests traverse an ordered sequence of reliability and telemetry layers:
+Incoming requests traverse the middleware pipeline in order:
 
 ```text
-                         +-----------------------------------+
-                         |           Client Traffic          |
-                         +-----------------+-----------------+
-                                           |
-                                           v [Port 8080]
-     +---------------------------------------------------------------------------------+
-     |                               Aegora Gateway                                    |
-     |                                                                                 |
-     |  Incoming Request                                                               |
-     |         |                                                                       |
-     |         v                                                                       |
-     |   [1. Recovery]     Catch panics, write 500 JSON, maintain server uptime        |
-     |         |                                                                       |
-     |         v                                                                       |
-     |   [2. RequestID]    Extract or generate UUID, attach to context and headers     |
-     |         |                                                                       |
-     |         v                                                                       |
-     |   [3. Tracing]      Start OTel server span, propagate trace context             |
-     |         |                                                                       |
-     |         v                                                                       |
-     |   [4. Metrics]      Record RED method metrics (rate, error, duration, inflight) |
-     |         |                                                                       |
-     |         v                                                                       |
-     |   [5. AccessLog]    Emit structured slog entry with latency and status code     |
-     |         |                                                                       |
-     |         v                                                                       |
-     |   [6. Shedding]     AIMD controller drops low-priority traffic under latency    |
-     |         |                                                                       |
-     |         v                                                                       |
-     |   [7. RateLimit]    Sliding window or token bucket per IP/API key (L1 / Redis)  |
-     |         |                                                                       |
-     |         v                                                                       |
-     |   [8. Cache]        Return cached 200/304 on hit; buffer on miss (L1 / Redis)   |
-     |         |                                                                       |
-     |         v (cache miss)                                                          |
-     |   [9. Queue]        Priority classification and CoDel queue admission           |
-     |         |                                                                       |
-     |         v                                                                       |
-     |   [10. Gateway]     Match route, select target pool (round-robin / least-conn)  |
-     |         |           Per-route Circuit Breaker -> Retry with Jitter              |
-     +---------+-----------------------------------------------------------------------+
-               |
-               +----------------------------+----------------------------+
-               |                            |                            |
-               v                            v                            v
-      +-----------------+          +-----------------+          +-----------------+
-      |    Backend 1    |          |    Backend 2    |          |    Backend N    |
-      +-----------------+          +-----------------+          +-----------------+
-
-  Sidecars and Management Ports:
-      * Redis (Port 6379): Distributed rate limit counters and L2 response cache
-      * Prometheus (Port 9090): /metrics endpoint scraping gateway RED telemetry
-      * Admin API (Port 9091): /admin/health, /admin/routes, /admin/config, /admin/reload
+Client -> Recovery -> RequestID -> Tracing -> Metrics -> AccessLog -> Shedding -> RateLimit -> Cache -> Queue -> Gateway -> Upstreams
 ```
+
+Sidecars and auxiliary ports:
+- **Redis (`6379`)**: Distributed rate limit counters and L2 response cache.
+- **Prometheus (`9090`)**: `/metrics` telemetry scraping.
+- **Admin API (`9091`)**: `/admin/health`, `/admin/routes`, `/admin/config`, `/admin/reload`.
 
 ---
 
@@ -239,7 +196,7 @@ go test -bench=. -benchtime=2s -benchmem ./internal/...
 
 ### Measured Performance
 
-The following benchmarks were conducted on macOS (Apple M1, 8 cores) running Go 1.25/1.26:
+The following benchmarks were conducted on macOS (Apple M1, 8 cores) running Go 1.26.4:
 
 | Benchmark | Iterations (2s) | Latency | Memory | Allocs | Description |
 |---|---|---|---|---|---|
@@ -254,8 +211,30 @@ The following benchmarks were conducted on macOS (Apple M1, 8 cores) running Go 
 
 ---
 
-## Project Status and License
+## Documentation
 
-Aegora is under active development by the Syncronix Labs team.
+- [Configuration Reference](docs/configuration.md): Complete guide to every configuration section, field, default value, validation constraint, and reload behavior.
+- [Architecture Guide](docs/architecture.md): Request processing lifecycle, design rationale, response buffering lessons learned, and concurrency model.
 
-This project is licensed under the Apache License, Version 2.0. See the repository documentation for ongoing release details.
+---
+
+## Project Status
+
+Aegora is built and maintained by Shubham Kashyap. Track ongoing development and planned milestones on [GitHub Issues](https://github.com/syncronix-labs/aegora/issues).
+
+---
+
+## Contributing
+
+Pull requests are welcome. Contribution guidelines:
+- Run `make verify` (formatting, tidy, lint, tests, build) before submitting changes.
+- Keep pull requests focused: one feature or bugfix per PR.
+- Do not squash-merge; maintain individual commit history with conventional commit messages.
+- Any PR that adds or changes a config field must update [docs/configuration.md](docs/configuration.md) in the same PR.
+
+---
+
+## License
+
+Licensed under the MIT License. See [LICENSE](LICENSE) for details.
+
