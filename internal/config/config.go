@@ -51,6 +51,16 @@ type Config struct {
 	Routes        []RouteConfig       `yaml:"routes"`
 	Observability ObservabilityConfig `yaml:"observability"`
 	RateLimit     RateLimitConfig     `yaml:"rate_limit,omitempty"`
+	Reliability   ReliabilityConfig   `yaml:"reliability,omitempty"`
+}
+
+// ReliabilityConfig holds circuit breaking and retry configuration.
+type ReliabilityConfig struct {
+	BreakerFailureThreshold int      `yaml:"breaker_failure_threshold,omitempty"`
+	BreakerCooldown         Duration `yaml:"breaker_cooldown,omitempty"`
+	RetryEnabled            bool     `yaml:"retry_enabled,omitempty"`
+	RetryMaxAttempts        int      `yaml:"retry_max_attempts,omitempty"`
+	RetryInitialDelay       Duration `yaml:"retry_initial_delay,omitempty"`
 }
 
 // RateLimitConfig configures gateway request rate limiting behavior.
@@ -251,5 +261,33 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.isReliabilityPresent() {
+		if c.Reliability.BreakerFailureThreshold < 1 {
+			return fmt.Errorf("config: reliability.breaker_failure_threshold: must be at least 1, got %d", c.Reliability.BreakerFailureThreshold)
+		}
+
+		if c.Reliability.BreakerCooldown <= 0 {
+			return fmt.Errorf("config: reliability.breaker_cooldown: must be positive, got %s", c.Reliability.BreakerCooldown)
+		}
+
+		if c.Reliability.RetryEnabled || c.Reliability.RetryMaxAttempts != 0 || c.Reliability.RetryInitialDelay != 0 {
+			if c.Reliability.RetryMaxAttempts < 1 {
+				return fmt.Errorf("config: reliability.retry_max_attempts: must be at least 1, got %d", c.Reliability.RetryMaxAttempts)
+			}
+
+			if c.Reliability.RetryInitialDelay <= 0 {
+				return fmt.Errorf("config: reliability.retry_initial_delay: must be positive, got %s", c.Reliability.RetryInitialDelay)
+			}
+		}
+	}
+
 	return nil
+}
+
+func (c *Config) isReliabilityPresent() bool {
+	return c.Reliability.BreakerFailureThreshold != 0 ||
+		c.Reliability.BreakerCooldown != 0 ||
+		c.Reliability.RetryEnabled ||
+		c.Reliability.RetryMaxAttempts != 0 ||
+		c.Reliability.RetryInitialDelay != 0
 }
