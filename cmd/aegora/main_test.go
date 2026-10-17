@@ -6,10 +6,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/syncronix-labs/aegora/internal/config"
 )
 
@@ -516,3 +519,231 @@ func TestBuildHandler_Shedding(t *testing.T) {
 		t.Fatalf("expected 200 for /livez, got %d", recLivez.Code)
 	}
 }
+
+func TestBuildHandler_Cache(t *testing.T) {
+	var backendHits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"cached":true}`))
+	}))
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:         "127.0.0.1:8080",
+			ReadTimeout:  config.Duration(15 * time.Second),
+			WriteTimeout: config.Duration(15 * time.Second),
+			IdleTimeout:  config.Duration(30 * time.Second),
+		},
+		Routes: []config.RouteConfig{
+			{
+				Name:       "cached-route",
+				PathPrefix: "/api",
+				Targets:    []string{backend.URL},
+			},
+		},
+		Observability: config.ObservabilityConfig{
+			LogLevel: "info",
+		},
+		Cache: config.CacheConfig{
+			Enabled:      true,
+			TTL:          config.Duration(60 * time.Second),
+			MaxEntries:   100,
+			MaxBodyBytes: 1024 * 1024,
+		},
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildHandler: %v", err)
+	}
+
+	// First GET: miss, backend called
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodGet, "/api/resource", nil)
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", rec1.Code)
+	}
+	if rec1.Header().Get("X-Cache") != "MISS" {
+		t.Fatalf("expected X-Cache MISS, got %q", rec1.Header().Get("X-Cache"))
+	}
+	if backendHits.Load() != 1 {
+		t.Fatalf("expected 1 backend hit, got %d", backendHits.Load())
+	}
+
+	// Second GET: hit, backend NOT called
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/api/resource", nil)
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want 200", rec2.Code)
+	}
+	if rec2.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("expected X-Cache HIT, got %q", rec2.Header().Get("X-Cache"))
+	}
+	if backendHits.Load() != 1 {
+		t.Fatalf("expected backend hits to remain 1 after cache hit, got %d", backendHits.Load())
+	}
+
+	// Health check bypasses cache and returns 200
+	recLivez := httptest.NewRecorder()
+	reqLivez := httptest.NewRequest(http.MethodGet, "/livez", nil)
+	handler.ServeHTTP(recLivez, reqLivez)
+	if recLivez.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /livez, got %d", recLivez.Code)
+	}
+}
+
+func TestBuildHandler_TieredCache(t *testing.T) {
+	s := miniredis.RunT(t)
+	var backendHits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"tiered":true}`))
+	}))
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:         "127.0.0.1:8080",
+			ReadTimeout:  config.Duration(15 * time.Second),
+			WriteTimeout: config.Duration(15 * time.Second),
+			IdleTimeout:  config.Duration(30 * time.Second),
+		},
+		Routes: []config.RouteConfig{
+			{
+				Name:       "cached-route",
+				PathPrefix: "/api",
+				Targets:    []string{backend.URL},
+			},
+		},
+		Observability: config.ObservabilityConfig{
+			LogLevel: "info",
+		},
+		Cache: config.CacheConfig{
+			Enabled:      true,
+			TTL:          config.Duration(60 * time.Second),
+			L2Enabled:    true,
+			L2TTL:        config.Duration(5 * time.Minute),
+			RedisAddr:    s.Addr(),
+			MaxEntries:   100,
+			MaxBodyBytes: 1024 * 1024,
+		},
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildHandler: %v", err)
+	}
+
+	// First request: miss, calls backend and writes through to miniredis
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodGet, "/api/tiered", nil)
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", rec1.Code)
+	}
+	if rec1.Header().Get("X-Cache") != "MISS" {
+		t.Fatalf("expected X-Cache MISS, got %q", rec1.Header().Get("X-Cache"))
+	}
+	if backendHits.Load() != 1 {
+		t.Fatalf("expected 1 backend hit, got %d", backendHits.Load())
+	}
+
+	// Verify key was written to Redis L2
+	if !s.Exists("aegora:cache:v1:GET /api/tiered?") {
+		t.Fatal("expected Redis to contain cached key")
+	}
+
+	// Second request: hit, backend NOT called
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/api/tiered", nil)
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want 200", rec2.Code)
+	}
+	if rec2.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("expected X-Cache HIT, got %q", rec2.Header().Get("X-Cache"))
+	}
+	if backendHits.Load() != 1 {
+		t.Fatalf("expected backend hits to remain 1 after cache hit, got %d", backendHits.Load())
+	}
+}
+
+func TestBuildHandler_TieredCache_UnreachableDegrades(t *testing.T) {
+	var backendHits atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"degraded":true}`))
+	}))
+	defer backend.Close()
+
+	// Use an unreachable local port so Redis dial immediately fails
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:         "127.0.0.1:8080",
+			ReadTimeout:  config.Duration(15 * time.Second),
+			WriteTimeout: config.Duration(15 * time.Second),
+			IdleTimeout:  config.Duration(30 * time.Second),
+		},
+		Routes: []config.RouteConfig{
+			{
+				Name:       "cached-route",
+				PathPrefix: "/api",
+				Targets:    []string{backend.URL},
+			},
+		},
+		Observability: config.ObservabilityConfig{
+			LogLevel: "info",
+		},
+		Cache: config.CacheConfig{
+			Enabled:      true,
+			TTL:          config.Duration(60 * time.Second),
+			L2Enabled:    true,
+			L2TTL:        config.Duration(5 * time.Minute),
+			RedisAddr:    "127.0.0.1:65530",
+			MaxEntries:   100,
+			MaxBodyBytes: 1024 * 1024,
+		},
+	}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildHandler should not fail when Redis unreachable: %v", err)
+	}
+
+	// Verify log contains warning about degrading to L1
+	if !strings.Contains(logBuf.String(), "degrading to l1-only") {
+		t.Errorf("expected warning log about degrading to L1, got: %s", logBuf.String())
+	}
+
+	// Verify L1 cache still works
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodGet, "/api/degraded", nil)
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec1.Code)
+	}
+	if rec1.Header().Get("X-Cache") != "MISS" {
+		t.Fatalf("expected X-Cache MISS, got %q", rec1.Header().Get("X-Cache"))
+	}
+
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/api/degraded", nil)
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("expected X-Cache HIT on L1 cache, got %q", rec2.Header().Get("X-Cache"))
+	}
+}
+

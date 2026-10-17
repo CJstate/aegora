@@ -57,3 +57,13 @@ shedding:
     high: ["/api/payments"]
     low: ["/api/analytics"]
 
+cache:
+  enabled: false
+  ttl: "60s"              # L1 TTL
+  l2_enabled: false
+  l2_ttl: "5m"
+  redis_addr: "127.0.0.1:6379"
+  max_entries: 10000
+  max_body_bytes: 1048576
+
+
