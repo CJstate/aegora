@@ -2,7 +2,10 @@ module github.com/syncronix-labs/aegora
 
 go 1.26.4
 
-require github.com/golangci/golangci-lint v1.64.8
+require (
+	github.com/golangci/golangci-lint v1.64.8
+	gopkg.in/yaml.v3 v3.0.1
+)
 
 require (
 	4d63.com/gocheckcompilerdirectives v1.3.0 // indirect
@@ -185,7 +188,6 @@ require (
 	google.golang.org/protobuf v1.36.5 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	honnef.co/go/tools v0.6.1 // indirect
 	mvdan.cc/gofumpt v0.7.0 // indirect
 	mvdan.cc/unparam v0.0.0-20240528143540-8a5130ca722f // indirect
