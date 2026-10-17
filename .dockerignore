@@ -1,0 +1,25 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# IDEs and local tooling
+.vscode/
+.idea/
+.gemini/
+.agents/
+.DS_Store
+
+# Local binaries and build artifacts
+bin/
+dist/
+tmp/
+*.log
+
+# Documentation and scratch files
+docs/
+*.md
+
+# Compose runtime environments
+deployments/docker-compose.yml
+deployments/*.yaml
