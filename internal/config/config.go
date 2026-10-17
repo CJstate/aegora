@@ -4,6 +4,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -54,6 +55,19 @@ type Config struct {
 	Reliability   ReliabilityConfig   `yaml:"reliability,omitempty"`
 	Queue         QueueConfig         `yaml:"queue,omitempty"`
 	Shedding      SheddingConfig      `yaml:"shedding,omitempty"`
+	Cache         CacheConfig         `yaml:"cache,omitempty"`
+}
+
+// CacheConfig configures HTTP response caching for GET and HEAD requests.
+// Supports multi-tier caching (L1 in-memory + optional L2 Redis).
+type CacheConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	TTL          Duration `yaml:"ttl,omitempty"`
+	L2Enabled    bool     `yaml:"l2_enabled,omitempty"`
+	L2TTL        Duration `yaml:"l2_ttl,omitempty"`
+	RedisAddr    string   `yaml:"redis_addr,omitempty"`
+	MaxEntries   int      `yaml:"max_entries,omitempty"`
+	MaxBodyBytes int      `yaml:"max_body_bytes,omitempty"`
 }
 
 // SheddingConfig configures adaptive load shedding with an AIMD controller.
@@ -334,6 +348,27 @@ func (c *Config) Validate() error {
 		}
 		if c.Shedding.AdjustInterval <= 0 {
 			return fmt.Errorf("config: shedding.adjust_interval: must be positive, got %s", c.Shedding.AdjustInterval)
+		}
+	}
+
+	if c.Cache.Enabled {
+		if c.Cache.TTL <= 0 {
+			return fmt.Errorf("config: cache.ttl: must be positive, got %s", c.Cache.TTL)
+		}
+		if c.Cache.MaxEntries <= 0 {
+			return fmt.Errorf("config: cache.max_entries: must be positive, got %d", c.Cache.MaxEntries)
+		}
+		if c.Cache.MaxBodyBytes <= 0 {
+			return fmt.Errorf("config: cache.max_body_bytes: must be positive, got %d", c.Cache.MaxBodyBytes)
+		}
+	}
+
+	if c.Cache.L2Enabled {
+		if strings.TrimSpace(c.Cache.RedisAddr) == "" {
+			return errors.New("config: cache.redis_addr: required when cache.l2_enabled is true")
+		}
+		if c.Cache.L2TTL <= 0 {
+			return fmt.Errorf("config: cache.l2_ttl: must be positive, got %s", c.Cache.L2TTL)
 		}
 	}
 

@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+	"github.com/syncronix-labs/aegora/internal/cache"
 	"github.com/syncronix-labs/aegora/internal/config"
 	"github.com/syncronix-labs/aegora/internal/middleware"
 	"github.com/syncronix-labs/aegora/internal/proxy"
@@ -186,6 +188,49 @@ func buildApp(cfg *config.Config, logger *slog.Logger) (http.Handler, *queue.Que
 		gwHandler = q.Admit(gw)
 	}
 
+	// In-memory / multi-tier response caching: positioned between RateLimit and Queue.Admit so that
+	// hits skip queueing and backend load (the expensive parts) while per-key rate
+	// limiting still applies uniformly.
+	if cfg.Cache.Enabled {
+		logger.Info("cache enabled",
+			slog.Bool("enabled", cfg.Cache.Enabled),
+			slog.Duration("ttl", cfg.Cache.TTL.Duration()),
+			slog.Int("max_entries", cfg.Cache.MaxEntries),
+			slog.Bool("l2_enabled", cfg.Cache.L2Enabled),
+		)
+		l1Cache := cache.NewCache(cfg.Cache.MaxEntries, cfg.Cache.MaxBodyBytes)
+		var cacheStore cache.Store = l1Cache
+
+		if cfg.Cache.L2Enabled {
+			// Multi-tier caching: L1 in-memory backed by distributed L2 Redis.
+			// Caching is best-effort: if Redis is unreachable at startup, log a warning
+			// and degrade gracefully to L1-only rather than failing server bootstrap.
+			rdb := redis.NewClient(&redis.Options{
+				Addr: cfg.Cache.RedisAddr,
+			})
+			pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if err := rdb.Ping(pingCtx).Err(); err != nil {
+				pingCancel()
+				logger.Warn("redis l2 cache unreachable at startup; degrading to l1-only",
+					slog.String("addr", cfg.Cache.RedisAddr),
+					slog.String("error", err.Error()),
+				)
+				_ = rdb.Close()
+			} else {
+				pingCancel()
+				logger.Info("redis l2 cache connected",
+					slog.String("addr", cfg.Cache.RedisAddr),
+					slog.Duration("l2_ttl", cfg.Cache.L2TTL.Duration()),
+				)
+				cacheStore = cache.NewTieredCache(l1Cache, rdb, cfg.Cache.TTL.Duration(), cfg.Cache.L2TTL.Duration())
+			}
+		}
+
+		// Note: CacheMiddleware requires zero modifications to support TieredCache
+		// because it programs strictly against the Store interface with the L1 TTL.
+		gwHandler = cache.CacheMiddleware(cacheStore, cfg.Cache.TTL.Duration(), cfg.Cache.MaxBodyBytes)(gwHandler)
+	}
+
 	mux := buildMux(gwHandler)
 
 	mws := []middleware.Middleware{
@@ -230,10 +275,11 @@ func buildApp(cfg *config.Config, logger *slog.Logger) (http.Handler, *queue.Que
 //     measure exact routing and handler execution latency while capturing the final HTTP status code.
 //  4. Load Shedding (optional): Positioned immediately after AccessLog and before RateLimit to shed
 //     globally before spending per-key rate-limit budget or queue capacity.
-//  5. RateLimit (optional): Positioned between Load Shedding and the mux/gateway to enforce
-//     per-key rate limits while ensuring rejected requests (429) are logged by AccessLog
-//     with assigned request IDs.
-//  6. Queue Admission (optional): Positioned between RateLimit and the upstream gateway to enforce
+//  5. RateLimit (optional): Positioned between Load Shedding and Cache / mux / gateway to enforce
+//     per-key rate limits uniformly on all incoming requests.
+//  6. Cache (optional): Positioned between RateLimit and Queue.Admit so that hits skip
+//     queueing and backend load (the expensive parts) while per-key rate limiting still applies uniformly.
+//  7. Queue Admission (optional): Positioned between Cache and the upstream gateway to enforce
 //     concurrency limits and CoDel bufferbloat drops on traffic routed to backend targets, while
 //     bypassing /livez and /readyz health probes.
 func buildHandler(cfg *config.Config, logger *slog.Logger) (http.Handler, error) {
