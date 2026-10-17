@@ -20,6 +20,7 @@ import (
 	"github.com/syncronix-labs/aegora/internal/middleware"
 	"github.com/syncronix-labs/aegora/internal/proxy"
 	"github.com/syncronix-labs/aegora/internal/ratelimit"
+	"github.com/syncronix-labs/aegora/internal/reliability"
 )
 
 // toProxyRoutes maps config.RouteConfig definitions into proxy.RouteConfig structures.
@@ -127,11 +128,63 @@ func buildRateLimitMiddleware(cfg config.RateLimitConfig) middleware.Middleware 
 //  3. AccessLog: Positioned after RequestID to capture the assigned request_id, and
 //     measure exact routing and handler execution latency while capturing the final HTTP status code.
 //  4. RateLimit (optional): Positioned between AccessLog and the mux/gateway to enforce
+//
+// toReliabilityConfig maps config.ReliabilityConfig to proxy.ReliabilityConfig with sensible defaults.
+func toReliabilityConfig(cfg config.ReliabilityConfig) proxy.ReliabilityConfig {
+	threshold := cfg.BreakerFailureThreshold
+	if threshold <= 0 {
+		threshold = 5
+	}
+
+	cooldown := cfg.BreakerCooldown.Duration()
+	if cooldown <= 0 {
+		cooldown = 30 * time.Second
+	}
+
+	attempts := cfg.RetryMaxAttempts
+	if attempts <= 0 {
+		attempts = 3
+	}
+
+	initialDelay := cfg.RetryInitialDelay.Duration()
+	if initialDelay <= 0 {
+		initialDelay = 100 * time.Millisecond
+	}
+
+	return proxy.ReliabilityConfig{
+		BreakerFailureThreshold: threshold,
+		BreakerCooldown:         cooldown,
+		BreakerHalfOpenProbes:   2,
+		BreakerSuccessThreshold: 2,
+		RetryEnabled:            cfg.RetryEnabled,
+		RetryPolicy: reliability.RetryPolicy{
+			MaxAttempts:  attempts,
+			InitialDelay: initialDelay,
+			MaxDelay:     2 * time.Second,
+			Multiplier:   2.0,
+			Jitter:       1.0,
+		},
+	}
+}
+
+// buildHandler constructs the HTTP handler wrapped with the middleware chain.
+//
+// Middleware chain ordering rationale:
+//  1. Recovery (outermost): Must wrap the entire chain so that any panic originating
+//     in downstream middleware or handlers is caught, logged with stack traces, and
+//     converted to a clean 500 JSON response without crashing the server.
+//  2. RequestID: Must execute before AccessLog and the handlers so that an X-Request-ID
+//     is generated/extracted and added to the request context early, making it available
+//     to both the access logger and all downstream business logic.
+//  3. AccessLog: Positioned after RequestID to capture the assigned request_id, and
+//     measure exact routing and handler execution latency while capturing the final HTTP status code.
+//  4. RateLimit (optional): Positioned between AccessLog and the mux/gateway to enforce
 //     per-key rate limits while ensuring rejected requests (429) are logged by AccessLog
 //     with assigned request IDs.
 func buildHandler(cfg *config.Config, logger *slog.Logger) (http.Handler, error) {
 	gwRoutes := toProxyRoutes(cfg.Routes)
-	gw, err := proxy.NewGateway(gwRoutes)
+	rc := toReliabilityConfig(cfg.Reliability)
+	gw, err := proxy.NewGateway(gwRoutes, rc)
 	if err != nil {
 		return nil, fmt.Errorf("build gateway: %w", err)
 	}

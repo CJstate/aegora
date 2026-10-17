@@ -377,6 +377,22 @@ func TestLoad_SampleDevConfig(t *testing.T) {
 	if cfg.RateLimit.Key != "ip" {
 		t.Errorf("expected rate_limit.key = ip, got %s", cfg.RateLimit.Key)
 	}
+
+	if cfg.Reliability.BreakerFailureThreshold != 5 {
+		t.Errorf("expected breaker_failure_threshold = 5, got %d", cfg.Reliability.BreakerFailureThreshold)
+	}
+	if cfg.Reliability.BreakerCooldown.Duration() != 30*time.Second {
+		t.Errorf("expected breaker_cooldown = 30s, got %s", cfg.Reliability.BreakerCooldown)
+	}
+	if !cfg.Reliability.RetryEnabled {
+		t.Errorf("expected retry_enabled = true")
+	}
+	if cfg.Reliability.RetryMaxAttempts != 3 {
+		t.Errorf("expected retry_max_attempts = 3, got %d", cfg.Reliability.RetryMaxAttempts)
+	}
+	if cfg.Reliability.RetryInitialDelay.Duration() != 100*time.Millisecond {
+		t.Errorf("expected retry_initial_delay = 100ms, got %s", cfg.Reliability.RetryInitialDelay)
+	}
 }
 
 func TestValidate_ExtendedRouteFields(t *testing.T) {
@@ -496,6 +512,96 @@ func TestValidate_RateLimit(t *testing.T) {
 				}
 			},
 			wantErrText: "rate_limit.refill_per_second",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := parseValidFixture(t)
+			tt.mutate(cfg)
+
+			err := cfg.Validate()
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("expected valid configuration, got: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErrText)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("expected error to contain %q, got: %v", tt.wantErrText, err)
+			}
+		})
+	}
+}
+
+func TestValidate_Reliability(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(*config.Config)
+		wantErrText string
+	}{
+		{
+			name: "valid reliability config",
+			mutate: func(c *config.Config) {
+				c.Reliability = config.ReliabilityConfig{
+					BreakerFailureThreshold: 5,
+					BreakerCooldown:         config.Duration(30 * time.Second),
+					RetryEnabled:            true,
+					RetryMaxAttempts:        3,
+					RetryInitialDelay:       config.Duration(100 * time.Millisecond),
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "breaker_failure_threshold less than 1",
+			mutate: func(c *config.Config) {
+				c.Reliability = config.ReliabilityConfig{
+					BreakerFailureThreshold: 0,
+					BreakerCooldown:         config.Duration(30 * time.Second),
+				}
+			},
+			wantErrText: "reliability.breaker_failure_threshold",
+		},
+		{
+			name: "breaker_cooldown non-positive",
+			mutate: func(c *config.Config) {
+				c.Reliability = config.ReliabilityConfig{
+					BreakerFailureThreshold: 5,
+					BreakerCooldown:         0,
+				}
+			},
+			wantErrText: "reliability.breaker_cooldown",
+		},
+		{
+			name: "retry_max_attempts less than 1 when retry enabled",
+			mutate: func(c *config.Config) {
+				c.Reliability = config.ReliabilityConfig{
+					BreakerFailureThreshold: 5,
+					BreakerCooldown:         config.Duration(30 * time.Second),
+					RetryEnabled:            true,
+					RetryMaxAttempts:        0,
+					RetryInitialDelay:       config.Duration(100 * time.Millisecond),
+				}
+			},
+			wantErrText: "reliability.retry_max_attempts",
+		},
+		{
+			name: "retry_initial_delay non-positive when retry enabled",
+			mutate: func(c *config.Config) {
+				c.Reliability = config.ReliabilityConfig{
+					BreakerFailureThreshold: 5,
+					BreakerCooldown:         config.Duration(30 * time.Second),
+					RetryEnabled:            true,
+					RetryMaxAttempts:        3,
+					RetryInitialDelay:       0,
+				}
+			},
+			wantErrText: "reliability.retry_initial_delay",
 		},
 	}
 

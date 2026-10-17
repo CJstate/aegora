@@ -31,3 +31,9 @@ rate_limit:
   window: "1m"
   key: "ip"
 
+reliability:
+  breaker_failure_threshold: 5
+  breaker_cooldown: "30s"
+  retry_enabled: true
+  retry_max_attempts: 3
+  retry_initial_delay: "100ms"
