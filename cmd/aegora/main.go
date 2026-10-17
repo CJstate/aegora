@@ -18,7 +18,26 @@ import (
 
 	"github.com/syncronix-labs/aegora/internal/config"
 	"github.com/syncronix-labs/aegora/internal/middleware"
+	"github.com/syncronix-labs/aegora/internal/proxy"
 )
+
+// toProxyRoutes maps config.RouteConfig definitions into proxy.RouteConfig structures.
+func toProxyRoutes(cfgRoutes []config.RouteConfig) []proxy.RouteConfig {
+	routes := make([]proxy.RouteConfig, len(cfgRoutes))
+	for i, r := range cfgRoutes {
+		routes[i] = proxy.RouteConfig{
+			Name:             r.Name,
+			PathPrefix:       r.PathPrefix,
+			PathRegexPattern: r.PathRegex,
+			Methods:          r.Methods,
+			Headers:          r.Headers,
+			Targets:          r.Targets,
+			StripPrefix:      r.StripPrefix,
+			LBPolicy:         r.LB,
+		}
+	}
+	return routes
+}
 
 // parseLogLevel parses a log level string case-insensitively into a slog.Level.
 func parseLogLevel(level string) (slog.Level, error) {
@@ -36,10 +55,9 @@ func parseLogLevel(level string) (slog.Level, error) {
 	}
 }
 
-// buildMux registers the HTTP endpoints with method-qualified patterns.
-// Health endpoints respond to GET requests with 200 OK, while all other routes
-// return a 501 Not Implemented response pending Phase 2 dynamic routing.
-func buildMux() *http.ServeMux {
+// buildMux registers health endpoints and delegates all other incoming traffic
+// to the dynamic reverse proxy gateway.
+func buildMux(gw http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) {
@@ -61,9 +79,7 @@ func buildMux() *http.ServeMux {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotImplemented)
-		_, _ = w.Write([]byte(`{"error":"not implemented"}`))
+		gw.ServeHTTP(w, r)
 	})
 
 	return mux
@@ -81,8 +97,14 @@ func buildMux() *http.ServeMux {
 //  3. AccessLog: Positioned after RequestID to capture the assigned request_id, and
 //     immediately wraps the ServeMux to measure exact routing and handler execution
 //     latency while capturing the final HTTP status code.
-func buildHandler(_ *config.Config, logger *slog.Logger) http.Handler {
-	mux := buildMux()
+func buildHandler(cfg *config.Config, logger *slog.Logger) (http.Handler, error) {
+	gwRoutes := toProxyRoutes(cfg.Routes)
+	gw, err := proxy.NewGateway(gwRoutes)
+	if err != nil {
+		return nil, fmt.Errorf("build gateway: %w", err)
+	}
+
+	mux := buildMux(gw)
 
 	chain := middleware.New(
 		middleware.Recovery(logger),
@@ -90,7 +112,7 @@ func buildHandler(_ *config.Config, logger *slog.Logger) http.Handler {
 		middleware.AccessLog(logger),
 	)
 
-	return chain.Then(mux)
+	return chain.Then(mux), nil
 }
 
 // isCLITestRun detects if the binary was invoked by the repository integration test runner.
@@ -128,7 +150,11 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
 
-	handler := buildHandler(cfg, logger)
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error building handler: %v\n", err)
+		os.Exit(1)
+	}
 
 	server := &http.Server{
 		Addr:         cfg.Server.Addr,
