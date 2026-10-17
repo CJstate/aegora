@@ -1,0 +1,97 @@
+# Aegora Gateway Compose Demonstration Configuration
+#
+# Network Binding Notes:
+# Inside a Docker Compose network, binding to 127.0.0.1 (localhost) binds strictly
+# to the container's private loopback interface, which blocks incoming traffic forwarded
+# across the Docker bridge or host port mappings. All listeners intended to receive
+# external or inter-container traffic MUST bind to 0.0.0.0 (all interfaces).
+# Similarly, upstreams and auxiliary services must use their Compose service names
+# (e.g. backend-1, redis) rather than localhost/127.0.0.1.
+
+server:
+  # Bind 0.0.0.0 to accept mapped traffic from host port 8080.
+  # (127.0.0.1 would only accept connections originating from inside the aegora container itself).
+  addr: "0.0.0.0:8080"
+  read_timeout: "30s"
+  write_timeout: "30s"
+  idle_timeout: "60s"
+
+routes:
+  - name: "api-service"
+    path_prefix: "/api"
+    methods:
+      - "GET"
+      - "POST"
+    # Target points to the 'backend-1' Docker Compose service hostname on port 8081.
+    # (Using 127.0.0.1:8081 here would fail because backend-1 runs in its own container network namespace).
+    targets:
+      - "http://backend-1:8081"
+    strip_prefix: "/api"
+    lb: "round_robin"
+
+  - name: "web-service"
+    path_prefix: "/"
+    # Target points to the 'backend-2' Docker Compose service hostname on port 8082.
+    # (Using 127.0.0.1:8082 here would fail because backend-2 runs in its own container network namespace).
+    targets:
+      - "http://backend-2:8082"
+    lb: "least_connections"
+
+observability:
+  log_level: "info"
+  # Bind 0.0.0.0 to allow Prometheus scrapers or host requests on port 9090 to access metrics.
+  metrics_addr: "0.0.0.0:9090"
+  tracing:
+    enabled: false
+    exporter: "stdout"
+    otlp_endpoint: "localhost:4318"
+    sample_ratio: 1.0
+
+admin:
+  enabled: true
+  # Bind 0.0.0.0 to allow administrator CLI tools or host curl commands on port 9091 to reach the admin API.
+  addr: "0.0.0.0:9091"
+
+rate_limit:
+  enabled: true
+  limiter: "sliding_window"
+  max_requests: 120
+  window: "1m"
+  key: "ip"
+
+reliability:
+  breaker_failure_threshold: 5
+  breaker_cooldown: "30s"
+  retry_enabled: true
+  retry_max_attempts: 3
+  retry_initial_delay: "100ms"
+
+queue:
+  enabled: false
+  max_inflight: 200
+  max_queue_depth: 1000
+  codel_target: "100ms"
+  codel_interval: "1s"
+  priority_paths:
+    high: ["/api/payments"]
+    low: ["/api/analytics"]
+
+shedding:
+  enabled: false
+  target_p99: "500ms"
+  min_admit_rate: 0.05
+  adjust_interval: "1s"
+  priority_paths:
+    high: ["/api/payments"]
+    low: ["/api/analytics"]
+
+cache:
+  enabled: true
+  ttl: "60s"              # L1 in-memory cache TTL
+  l2_enabled: true
+  l2_ttl: "5m"
+  # Points to the 'redis' service hostname in the Compose network on port 6379.
+  # (127.0.0.1:6379 would look for Redis inside the aegora container itself, where no Redis server runs).
+  redis_addr: "redis:6379"
+  max_entries: 10000
+  max_body_bytes: 1048576
