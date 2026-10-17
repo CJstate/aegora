@@ -444,6 +444,15 @@ func TestLoad_SampleDevConfig(t *testing.T) {
 	if cfg.Cache.MaxBodyBytes != 1048576 {
 		t.Errorf("expected cache.max_body_bytes = 1048576, got %d", cfg.Cache.MaxBodyBytes)
 	}
+	if cfg.Cache.L2Enabled != false {
+		t.Errorf("expected cache.l2_enabled = false, got %v", cfg.Cache.L2Enabled)
+	}
+	if cfg.Cache.L2TTL.Duration() != 5*time.Minute {
+		t.Errorf("expected cache.l2_ttl = 5m, got %s", cfg.Cache.L2TTL)
+	}
+	if cfg.Cache.RedisAddr != "127.0.0.1:6379" {
+		t.Errorf("expected cache.redis_addr = '127.0.0.1:6379', got %q", cfg.Cache.RedisAddr)
+	}
 }
 
 func TestValidate_ExtendedRouteFields(t *testing.T) {
@@ -1038,6 +1047,81 @@ func TestValidate_Cache(t *testing.T) {
 				}
 			},
 			wantErrText: "cache.max_body_bytes",
+		},
+		{
+			name: "l2_enabled with empty redis_addr",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled:      true,
+					TTL:          config.Duration(60 * time.Second),
+					MaxEntries:   10000,
+					MaxBodyBytes: 1048576,
+					L2Enabled:    true,
+					RedisAddr:    "",
+					L2TTL:        config.Duration(5 * time.Minute),
+				}
+			},
+			wantErrText: "cache.redis_addr",
+		},
+		{
+			name: "l2_enabled with whitespace-only redis_addr",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled:      true,
+					TTL:          config.Duration(60 * time.Second),
+					MaxEntries:   10000,
+					MaxBodyBytes: 1048576,
+					L2Enabled:    true,
+					RedisAddr:    "   ",
+					L2TTL:        config.Duration(5 * time.Minute),
+				}
+			},
+			wantErrText: "cache.redis_addr",
+		},
+		{
+			name: "l2_enabled with zero l2_ttl",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled:      true,
+					TTL:          config.Duration(60 * time.Second),
+					MaxEntries:   10000,
+					MaxBodyBytes: 1048576,
+					L2Enabled:    true,
+					RedisAddr:    "127.0.0.1:6379",
+					L2TTL:        0,
+				}
+			},
+			wantErrText: "cache.l2_ttl",
+		},
+		{
+			name: "l2_enabled with negative l2_ttl",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled:      true,
+					TTL:          config.Duration(60 * time.Second),
+					MaxEntries:   10000,
+					MaxBodyBytes: 1048576,
+					L2Enabled:    true,
+					RedisAddr:    "127.0.0.1:6379",
+					L2TTL:        config.Duration(-time.Minute),
+				}
+			},
+			wantErrText: "cache.l2_ttl",
+		},
+		{
+			name: "valid l2 configuration",
+			mutate: func(c *config.Config) {
+				c.Cache = config.CacheConfig{
+					Enabled:      true,
+					TTL:          config.Duration(60 * time.Second),
+					MaxEntries:   10000,
+					MaxBodyBytes: 1048576,
+					L2Enabled:    true,
+					RedisAddr:    "127.0.0.1:6379",
+					L2TTL:        config.Duration(5 * time.Minute),
+				}
+			},
+			wantErrText: "",
 		},
 	}
 
