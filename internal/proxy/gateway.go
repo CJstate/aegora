@@ -43,6 +43,7 @@ type ReliabilityConfig struct {
 	BreakerSuccessThreshold int
 	RetryEnabled            bool
 	RetryPolicy             reliability.RetryPolicy
+	BaseTransport           http.RoundTripper
 }
 
 // Gateway routes incoming HTTP requests to upstream server pools via reverse proxies,
@@ -81,8 +82,12 @@ func NewGateway(routes []RouteConfig, rc ReliabilityConfig) (*Gateway, error) {
 	}
 
 	// RetryTransport may be shared across routes since it is stateless beyond its policy.
-	// When retry is disabled, BreakerTransport chains directly over NewTransport().
-	var baseTransport http.RoundTripper = NewTransport()
+	// When retry is disabled, BreakerTransport chains directly over the base transport
+	// (rc.BaseTransport or NewTransport()).
+	baseTransport := rc.BaseTransport
+	if baseTransport == nil {
+		baseTransport = NewTransport()
+	}
 	if rc.RetryEnabled {
 		baseTransport = &reliability.RetryTransport{
 			Base:   baseTransport,

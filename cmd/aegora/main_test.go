@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -819,6 +820,68 @@ func TestBuildHandler_PrometheusMetrics(t *testing.T) {
 	}
 	if !strings.Contains(metricsOutput, `aegora_request_duration_seconds_count{method="GET",route="metrics-test-route"} 1`) {
 		t.Errorf("expected duration seconds count in metrics output, got:\n%s", metricsOutput)
+	}
+}
+
+func TestBuildHandler_OpenTelemetryTracing(t *testing.T) {
+	var receivedTraceparent string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedTraceparent = r.Header.Get("traceparent")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"proxied"}`))
+	}))
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:         "127.0.0.1:8080",
+			ReadTimeout:  config.Duration(15 * time.Second),
+			WriteTimeout: config.Duration(15 * time.Second),
+			IdleTimeout:  config.Duration(30 * time.Second),
+		},
+		Routes: []config.RouteConfig{
+			{
+				Name:       "trace-test-route",
+				PathPrefix: "/api",
+				Targets:    []string{backend.URL},
+			},
+		},
+		Observability: config.ObservabilityConfig{
+			LogLevel: "info",
+			Tracing: config.TracingConfig{
+				Enabled:     true,
+				Exporter:    "stdout",
+				SampleRatio: 1.0,
+			},
+		},
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildHandler: %v", err)
+	}
+
+	const parentTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const parentSpanID = "00f067aa0ba902b7"
+	incomingTraceparent := fmt.Sprintf("00-%s-%s-01", parentTraceID, parentSpanID)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.Header.Set("traceparent", incomingTraceparent)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	if receivedTraceparent == "" {
+		t.Fatalf("expected backend to receive traceparent header from upstream propagation, got empty")
+	}
+
+	// Verify upstream backend received the exact same trace ID
+	if !strings.Contains(receivedTraceparent, parentTraceID) {
+		t.Errorf("expected propagated traceparent %q to contain parent trace ID %q", receivedTraceparent, parentTraceID)
 	}
 }
 

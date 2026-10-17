@@ -23,6 +23,11 @@ routes:
 observability:
   log_level: "info"
   metrics_addr: "127.0.0.1:9090"
+  tracing:
+    enabled: false
+    exporter: "stdout"   # or "otlp"
+    otlp_endpoint: "localhost:4318"
+    sample_ratio: 1.0
 
 rate_limit:
   enabled: true
