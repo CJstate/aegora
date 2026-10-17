@@ -47,3 +47,13 @@ queue:
   priority_paths:
     high: ["/api/payments"]
     low: ["/api/analytics"]
+
+shedding:
+  enabled: false
+  target_p99: "500ms"
+  min_admit_rate: 0.05
+  adjust_interval: "1s"
+  priority_paths:
+    high: ["/api/payments"]
+    low: ["/api/analytics"]
+
