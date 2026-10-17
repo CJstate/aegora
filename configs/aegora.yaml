@@ -7,13 +7,18 @@ server:
 routes:
   - name: "api-service"
     path_prefix: "/api"
+    methods:
+      - "GET"
+      - "POST"
     targets:
       - "http://127.0.0.1:8081"
     strip_prefix: "/api"
+    lb: "round_robin"
   - name: "web-service"
     path_prefix: "/"
     targets:
       - "http://127.0.0.1:3000"
+    lb: "least_connections"
 
 observability:
   log_level: "info"
