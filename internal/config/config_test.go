@@ -33,12 +33,14 @@ func TestLoad_Valid(t *testing.T) {
 					"http://127.0.0.1:8082",
 				},
 				StripPrefix: "/api/v1",
+				LB:          "round_robin",
 			},
 			{
 				Name:        "auth",
 				PathPrefix:  "/auth",
 				Targets:     []string{"https://auth.example.com"},
 				StripPrefix: "",
+				LB:          "round_robin",
 			},
 		},
 		Observability: config.ObservabilityConfig{
@@ -200,6 +202,20 @@ func TestValidate_MutatedNegativeCases(t *testing.T) {
 			},
 			wantFieldInErr: "observability.log_level",
 		},
+		{
+			name: "invalid path_regex",
+			mutate: func(c *config.Config) {
+				c.Routes[0].PathRegex = "[invalid-(regex"
+			},
+			wantFieldInErr: "routes[0].path_regex",
+		},
+		{
+			name: "invalid lb policy",
+			mutate: func(c *config.Config) {
+				c.Routes[0].LB = "random"
+			},
+			wantFieldInErr: "routes[0].lb",
+		},
 	}
 
 	for _, tt := range tests {
@@ -335,5 +351,26 @@ func TestLoad_SampleDevConfig(t *testing.T) {
 	}
 	if len(cfg.Routes) != 2 {
 		t.Errorf("expected 2 routes, got %d", len(cfg.Routes))
+	}
+	if cfg.Routes[0].LB != "round_robin" {
+		t.Errorf("expected route 0 LB round_robin, got %s", cfg.Routes[0].LB)
+	}
+	if cfg.Routes[1].LB != "least_connections" {
+		t.Errorf("expected route 1 LB least_connections, got %s", cfg.Routes[1].LB)
+	}
+	if !reflect.DeepEqual(cfg.Routes[0].Methods, []string{"GET", "POST"}) {
+		t.Errorf("expected route 0 methods [GET POST], got %v", cfg.Routes[0].Methods)
+	}
+}
+
+func TestValidate_ExtendedRouteFields(t *testing.T) {
+	cfg := parseValidFixture(t)
+	cfg.Routes[0].PathRegex = `^/api/v[0-9]+/items`
+	cfg.Routes[0].Methods = []string{"GET", "POST"}
+	cfg.Routes[0].Headers = map[string]string{"X-Api-Key": "secret"}
+	cfg.Routes[0].LB = "least_connections"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid configuration with extended fields, got: %v", err)
 	}
 }
