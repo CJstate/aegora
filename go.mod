@@ -5,6 +5,7 @@ go 1.26.4
 require (
 	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/golangci/golangci-lint v1.64.8
+	github.com/prometheus/client_golang v1.25.0
 	github.com/redis/go-redis/v9 v9.23.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -66,7 +67,6 @@ require (
 	github.com/go-xmlfmt/xmlfmt v1.1.3 // indirect
 	github.com/gobwas/glob v0.2.3 // indirect
 	github.com/gofrs/flock v0.12.1 // indirect
-	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/golangci/dupl v0.0.0-20250308024227-f665c8d69b32 // indirect
 	github.com/golangci/go-printf-func-name v0.1.0 // indirect
 	github.com/golangci/gofmt v0.0.0-20250106114630-d62b90e6713d // indirect
@@ -95,6 +95,7 @@ require (
 	github.com/kkHAIKE/contextcheck v1.1.6 // indirect
 	github.com/kulti/thelper v0.6.3 // indirect
 	github.com/kunwardeep/paralleltest v1.0.10 // indirect
+	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/lasiar/canonicalheader v1.1.2 // indirect
 	github.com/ldez/exptostd v0.4.2 // indirect
 	github.com/ldez/gomoddirectives v0.6.1 // indirect
@@ -110,11 +111,11 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
-	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
 	github.com/mgechev/revive v1.7.0 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/moricho/tparallel v0.3.2 // indirect
+	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nakabonne/nestif v0.3.1 // indirect
 	github.com/nishanths/exhaustive v0.12.0 // indirect
 	github.com/nishanths/predeclared v0.2.2 // indirect
@@ -123,10 +124,9 @@ require (
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.3 // indirect
 	github.com/polyfloyd/go-errorlint v1.7.1 // indirect
-	github.com/prometheus/client_golang v1.12.1 // indirect
-	github.com/prometheus/client_model v0.2.0 // indirect
-	github.com/prometheus/common v0.32.1 // indirect
-	github.com/prometheus/procfs v0.7.3 // indirect
+	github.com/prometheus/client_model v0.6.3 // indirect
+	github.com/prometheus/common v0.72.0 // indirect
+	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/quasilyte/go-ruleguard v0.4.3-0.20240823090925-0fe6f58b47b1 // indirect
 	github.com/quasilyte/go-ruleguard/dsl v0.3.22 // indirect
 	github.com/quasilyte/gogrep v0.5.0 // indirect
@@ -182,12 +182,14 @@ require (
 	go.uber.org/zap v1.24.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20250210185358-939b2ce775ac // indirect
-	golang.org/x/mod v0.24.0 // indirect
-	golang.org/x/sync v0.12.0 // indirect
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.22.0 // indirect
-	golang.org/x/tools v0.31.0 // indirect
-	google.golang.org/protobuf v1.36.5 // indirect
+	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/tools v0.49.0 // indirect
+	golang.org/x/tools/go/expect v0.1.1-deprecated // indirect
+	golang.org/x/tools/go/packages/packagestest v0.1.1-deprecated // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	honnef.co/go/tools v0.6.1 // indirect

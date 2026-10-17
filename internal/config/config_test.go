@@ -216,6 +216,20 @@ func TestValidate_MutatedNegativeCases(t *testing.T) {
 			},
 			wantFieldInErr: "routes[0].lb",
 		},
+		{
+			name: "invalid metrics_addr missing port",
+			mutate: func(c *config.Config) {
+				c.Observability.MetricsAddr = "127.0.0.1"
+			},
+			wantFieldInErr: "observability.metrics_addr",
+		},
+		{
+			name: "invalid metrics_addr host port",
+			mutate: func(c *config.Config) {
+				c.Observability.MetricsAddr = "not-a-valid-address"
+			},
+			wantFieldInErr: "observability.metrics_addr",
+		},
 	}
 
 	for _, tt := range tests {
