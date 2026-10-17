@@ -1,0 +1,40 @@
+services:
+  aegora:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    container_name: aegora-gateway
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+      - "9091:9091"
+    volumes:
+      - ./aegora.compose.yaml:/etc/aegora/aegora.yaml:ro
+    depends_on:
+      - redis
+      - backend-1
+      - backend-2
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: aegora-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  backend-1:
+    image: hashicorp/http-echo:latest
+    container_name: aegora-backend-1
+    command:
+      - "-listen=:8081"
+      - "-text=backend-1"
+    restart: unless-stopped
+
+  backend-2:
+    image: hashicorp/http-echo:latest
+    container_name: aegora-backend-2
+    command:
+      - "-listen=:8082"
+      - "-text=backend-2"
+    restart: unless-stopped

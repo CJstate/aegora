@@ -39,3 +39,15 @@ clean:
 .PHONY: tidy
 tidy:
 	go mod tidy
+
+.PHONY: docker-build
+docker-build:
+	docker build -f deployments/Dockerfile -t aegora:local .
+
+.PHONY: compose-up
+compose-up:
+	docker compose -f deployments/docker-compose.yml up --build -d
+
+.PHONY: compose-down
+compose-down:
+	docker compose -f deployments/docker-compose.yml down
