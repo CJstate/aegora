@@ -105,8 +105,8 @@ func New(reg *prometheus.Registry) *Metrics {
 // Middleware constructs an HTTP middleware that observes RED metrics for all requests.
 //
 // Middleware Placement Rationale:
-// Positioned right after RequestID in the gateway chain so that all requests—including
-// shed requests (503), rate-limited requests (429), and unmatched routes (404)—are
+// Positioned right after RequestID in the gateway chain so that all requests, including
+// shed requests (503), rate-limited requests (429), and unmatched routes (404), are
 // observed in telemetry before early rejection occurs.
 func Middleware(reg *prometheus.Registry, router RouteMatcher) middleware.Middleware {
 	m := New(reg)
