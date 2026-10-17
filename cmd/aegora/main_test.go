@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/syncronix-labs/aegora/internal/config"
 )
 
@@ -746,4 +749,140 @@ func TestBuildHandler_TieredCache_UnreachableDegrades(t *testing.T) {
 		t.Fatalf("expected X-Cache HIT on L1 cache, got %q", rec2.Header().Get("X-Cache"))
 	}
 }
+
+func TestBuildHandler_PrometheusMetrics(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"metric":true}`))
+	}))
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:         "127.0.0.1:8080",
+			ReadTimeout:  config.Duration(15 * time.Second),
+			WriteTimeout: config.Duration(15 * time.Second),
+			IdleTimeout:  config.Duration(30 * time.Second),
+		},
+		Routes: []config.RouteConfig{
+			{
+				Name:       "metrics-test-route",
+				PathPrefix: "/api",
+				Targets:    []string{backend.URL},
+			},
+		},
+		Observability: config.ObservabilityConfig{
+			LogLevel:    "info",
+			MetricsAddr: "127.0.0.1:9090",
+		},
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	reg := prometheus.NewRegistry()
+	handler, err := buildHandlerWithRegistry(cfg, logger, reg)
+	if err != nil {
+		t.Fatalf("buildHandlerWithRegistry: %v", err)
+	}
+
+	// Make request to matching route
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	// Make request to unmatched route (404)
+	rec404 := httptest.NewRecorder()
+	req404 := httptest.NewRequest(http.MethodGet, "/unmatched-path", nil)
+	handler.ServeHTTP(rec404, req404)
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec404.Code)
+	}
+
+	// Verify /metrics endpoint output using promhttp.HandlerFor
+	metricsHandler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
+	metricsRec := httptest.NewRecorder()
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsHandler.ServeHTTP(metricsRec, metricsReq)
+
+	if metricsRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /metrics, got %d", metricsRec.Code)
+	}
+
+	metricsOutput := metricsRec.Body.String()
+	if !strings.Contains(metricsOutput, `aegora_requests_total{code="200",method="GET",route="metrics-test-route"} 1`) {
+		t.Errorf("expected metrics to contain matching route 200 count, got:\n%s", metricsOutput)
+	}
+	if !strings.Contains(metricsOutput, `aegora_requests_total{code="404",method="GET",route="unmatched"} 1`) {
+		t.Errorf("expected metrics to contain unmatched route 404 count, got:\n%s", metricsOutput)
+	}
+	if !strings.Contains(metricsOutput, `aegora_request_duration_seconds_count{method="GET",route="metrics-test-route"} 1`) {
+		t.Errorf("expected duration seconds count in metrics output, got:\n%s", metricsOutput)
+	}
+}
+
+func TestBuildHandler_OpenTelemetryTracing(t *testing.T) {
+	var receivedTraceparent string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedTraceparent = r.Header.Get("traceparent")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"proxied"}`))
+	}))
+	defer backend.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:         "127.0.0.1:8080",
+			ReadTimeout:  config.Duration(15 * time.Second),
+			WriteTimeout: config.Duration(15 * time.Second),
+			IdleTimeout:  config.Duration(30 * time.Second),
+		},
+		Routes: []config.RouteConfig{
+			{
+				Name:       "trace-test-route",
+				PathPrefix: "/api",
+				Targets:    []string{backend.URL},
+			},
+		},
+		Observability: config.ObservabilityConfig{
+			LogLevel: "info",
+			Tracing: config.TracingConfig{
+				Enabled:     true,
+				Exporter:    "stdout",
+				SampleRatio: 1.0,
+			},
+		},
+	}
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, err := buildHandler(cfg, logger)
+	if err != nil {
+		t.Fatalf("buildHandler: %v", err)
+	}
+
+	const parentTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const parentSpanID = "00f067aa0ba902b7"
+	incomingTraceparent := fmt.Sprintf("00-%s-%s-01", parentTraceID, parentSpanID)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.Header.Set("traceparent", incomingTraceparent)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	if receivedTraceparent == "" {
+		t.Fatalf("expected backend to receive traceparent header from upstream propagation, got empty")
+	}
+
+	// Verify upstream backend received the exact same trace ID
+	if !strings.Contains(receivedTraceparent, parentTraceID) {
+		t.Errorf("expected propagated traceparent %q to contain parent trace ID %q", receivedTraceparent, parentTraceID)
+	}
+}
+
 

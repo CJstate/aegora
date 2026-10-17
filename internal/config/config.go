@@ -136,10 +136,19 @@ type RouteConfig struct {
 	LB          string            `yaml:"lb,omitempty"`
 }
 
+// TracingConfig configures OpenTelemetry distributed tracing.
+type TracingConfig struct {
+	Enabled      bool    `yaml:"enabled"`
+	Exporter     string  `yaml:"exporter,omitempty"`
+	OTLPEndpoint string  `yaml:"otlp_endpoint,omitempty"`
+	SampleRatio  float64 `yaml:"sample_ratio,omitempty"`
+}
+
 // ObservabilityConfig contains telemetry and logging configuration.
 type ObservabilityConfig struct {
-	LogLevel    string `yaml:"log_level"`
-	MetricsAddr string `yaml:"metrics_addr"`
+	LogLevel    string        `yaml:"log_level"`
+	MetricsAddr string        `yaml:"metrics_addr"`
+	Tracing     TracingConfig `yaml:"tracing,omitempty"`
 }
 
 // Load reads a YAML configuration file from path, decodes it strictly,
@@ -280,6 +289,24 @@ func (c *Config) Validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("config: observability.log_level: must be one of debug, info, warn, error; got %q", c.Observability.LogLevel)
+	}
+
+	if c.Observability.MetricsAddr != "" {
+		if _, err := net.ResolveTCPAddr("tcp", c.Observability.MetricsAddr); err != nil {
+			return fmt.Errorf("config: observability.metrics_addr: invalid address %q: %w", c.Observability.MetricsAddr, err)
+		}
+	}
+
+	if c.Observability.Tracing.Enabled {
+		if c.Observability.Tracing.Exporter != "stdout" && c.Observability.Tracing.Exporter != "otlp" {
+			return fmt.Errorf("config: observability.tracing.exporter: must be one of stdout, otlp; got %q", c.Observability.Tracing.Exporter)
+		}
+		if c.Observability.Tracing.SampleRatio <= 0.0 || c.Observability.Tracing.SampleRatio > 1.0 {
+			return fmt.Errorf("config: observability.tracing.sample_ratio: must be in (0, 1], got %f", c.Observability.Tracing.SampleRatio)
+		}
+		if c.Observability.Tracing.Exporter == "otlp" && strings.TrimSpace(c.Observability.Tracing.OTLPEndpoint) == "" {
+			return errors.New("config: observability.tracing.otlp_endpoint: required when exporter is otlp")
+		}
 	}
 
 	if c.RateLimit.Enabled {

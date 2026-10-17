@@ -216,6 +216,20 @@ func TestValidate_MutatedNegativeCases(t *testing.T) {
 			},
 			wantFieldInErr: "routes[0].lb",
 		},
+		{
+			name: "invalid metrics_addr missing port",
+			mutate: func(c *config.Config) {
+				c.Observability.MetricsAddr = "127.0.0.1"
+			},
+			wantFieldInErr: "observability.metrics_addr",
+		},
+		{
+			name: "invalid metrics_addr host port",
+			mutate: func(c *config.Config) {
+				c.Observability.MetricsAddr = "not-a-valid-address"
+			},
+			wantFieldInErr: "observability.metrics_addr",
+		},
 	}
 
 	for _, tt := range tests {
@@ -452,6 +466,19 @@ func TestLoad_SampleDevConfig(t *testing.T) {
 	}
 	if cfg.Cache.RedisAddr != "127.0.0.1:6379" {
 		t.Errorf("expected cache.redis_addr = '127.0.0.1:6379', got %q", cfg.Cache.RedisAddr)
+	}
+
+	if cfg.Observability.Tracing.Enabled {
+		t.Errorf("expected observability.tracing.enabled = false")
+	}
+	if cfg.Observability.Tracing.Exporter != "stdout" {
+		t.Errorf("expected observability.tracing.exporter = stdout, got %s", cfg.Observability.Tracing.Exporter)
+	}
+	if cfg.Observability.Tracing.OTLPEndpoint != "localhost:4318" {
+		t.Errorf("expected observability.tracing.otlp_endpoint = localhost:4318, got %s", cfg.Observability.Tracing.OTLPEndpoint)
+	}
+	if cfg.Observability.Tracing.SampleRatio != 1.0 {
+		t.Errorf("expected observability.tracing.sample_ratio = 1.0, got %f", cfg.Observability.Tracing.SampleRatio)
 	}
 }
 
@@ -1147,3 +1174,123 @@ func TestValidate_Cache(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_ObservabilityTracing(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(c *config.Config)
+		wantErrText string
+	}{
+		{
+			name: "tracing disabled ignores empty fields",
+			mutate: func(c *config.Config) {
+				c.Observability.Tracing = config.TracingConfig{
+					Enabled: false,
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "invalid exporter",
+			mutate: func(c *config.Config) {
+				c.Observability.Tracing = config.TracingConfig{
+					Enabled:     true,
+					Exporter:    "zipkin",
+					SampleRatio: 1.0,
+				}
+			},
+			wantErrText: "observability.tracing.exporter",
+		},
+		{
+			name: "zero sample_ratio",
+			mutate: func(c *config.Config) {
+				c.Observability.Tracing = config.TracingConfig{
+					Enabled:     true,
+					Exporter:    "stdout",
+					SampleRatio: 0.0,
+				}
+			},
+			wantErrText: "observability.tracing.sample_ratio",
+		},
+		{
+			name: "negative sample_ratio",
+			mutate: func(c *config.Config) {
+				c.Observability.Tracing = config.TracingConfig{
+					Enabled:     true,
+					Exporter:    "stdout",
+					SampleRatio: -0.1,
+				}
+			},
+			wantErrText: "observability.tracing.sample_ratio",
+		},
+		{
+			name: "sample_ratio greater than 1",
+			mutate: func(c *config.Config) {
+				c.Observability.Tracing = config.TracingConfig{
+					Enabled:     true,
+					Exporter:    "stdout",
+					SampleRatio: 1.05,
+				}
+			},
+			wantErrText: "observability.tracing.sample_ratio",
+		},
+		{
+			name: "otlp exporter with empty endpoint",
+			mutate: func(c *config.Config) {
+				c.Observability.Tracing = config.TracingConfig{
+					Enabled:      true,
+					Exporter:     "otlp",
+					OTLPEndpoint: "",
+					SampleRatio:  1.0,
+				}
+			},
+			wantErrText: "observability.tracing.otlp_endpoint",
+		},
+		{
+			name: "valid stdout tracing",
+			mutate: func(c *config.Config) {
+				c.Observability.Tracing = config.TracingConfig{
+					Enabled:     true,
+					Exporter:    "stdout",
+					SampleRatio: 0.5,
+				}
+			},
+			wantErrText: "",
+		},
+		{
+			name: "valid otlp tracing",
+			mutate: func(c *config.Config) {
+				c.Observability.Tracing = config.TracingConfig{
+					Enabled:      true,
+					Exporter:     "otlp",
+					OTLPEndpoint: "localhost:4318",
+					SampleRatio:  1.0,
+				}
+			},
+			wantErrText: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := parseValidFixture(t)
+			tt.mutate(cfg)
+
+			err := cfg.Validate()
+			if tt.wantErrText == "" {
+				if err != nil {
+					t.Fatalf("expected valid configuration, got: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErrText)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("expected error to contain %q, got: %v", tt.wantErrText, err)
+			}
+		})
+	}
+}
+
