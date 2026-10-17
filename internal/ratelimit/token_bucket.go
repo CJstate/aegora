@@ -53,3 +53,28 @@ func (tb *TokenBucket) Allow(context.Context) bool {
 
 	return true
 }
+
+// Limit returns the maximum token capacity.
+func (tb *TokenBucket) Limit() int {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	return int(tb.capacity)
+}
+
+// Remaining returns the estimated number of available tokens.
+// Best-effort under concurrency.
+func (tb *TokenBucket) Remaining() int {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(tb.lastRefill).Seconds()
+	tokens := tb.tokens + elapsed*tb.rate
+	if tokens > tb.capacity {
+		tokens = tb.capacity
+	}
+	if tokens < 0 {
+		return 0
+	}
+	return int(tokens)
+}
