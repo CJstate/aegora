@@ -67,11 +67,13 @@ Before working on the codebase, ensure your local environment has the following 
 
 ## Commit Message Conventions
 
-We enforce the Conventional Commits specification. Commit messages must follow the structure:
+We enforce the Conventional Commits specification and require scoped conventional commits for code changes. Format: type(scope): summary.
 
 ```text
-<type>(<scope>): <description>
+type(scope): summary
 ```
+
+feat and fix commits must carry a scope naming the affected package or area.
 
 Common types include:
 - `feat`: A new user-facing capability or architectural component.
@@ -83,13 +85,16 @@ Common types include:
 
 ### Examples from Repository History
 
-- `feat(reliability): add adaptive load shedding`
-- `feat(cache): add multi-tier cache`
-- `feat(admin): add admin api and config hot reload`
-- `docs: add configuration reference and architecture docs`
-- `feat(deploy): add docker packaging and compose setup`
+- `feat(middleware): add request body size limit`
+- `fix(reliability): do not trip breaker on oversized chunked bodies`
+- `fix(cache): normalize query parameter order in cache keys`
+- `docs: document VERSION Docker build arg`
 
 Write commit descriptions in the imperative, present tense (for example, "add feature" rather than "added feature").
+
+### Co-Authored-By Trailers
+
+Do not add Co-Authored-By trailers to commit messages. GitHub credits anyone named in a Co-Authored-By trailer as a repository contributor, which is reserved for the human author of the change. AI assistance is fine to use and should be disclosed in the pull request description instead of in commit metadata.
 
 ---
 

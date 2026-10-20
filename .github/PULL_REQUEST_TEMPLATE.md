@@ -18,3 +18,5 @@ Before submitting this pull request, please verify that you have completed the f
 - [ ] PR title follows the conventional commit style (for example, `feat(cache): add multi-tier cache` or `fix(proxy): handle connection reset`).
 - [ ] No em dash characters (`\u2014`) are used in user-facing text, error messages, or documentation (use plain hyphens).
 - [ ] Pull request is focused on one logical change (no unrelated refactorings or formatting changes mixed in).
+- [ ] Commits use the scoped conventional format and contain no Co-Authored-By trailers.
+- [ ] Any AI assistance used is disclosed in the description above.
