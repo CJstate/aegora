@@ -41,6 +41,38 @@ Envoy. Aegora packs the overload story into a single Go binary.
 
 ---
 
+## Install
+
+Download the release binary for your system and run it. First, find your platform keyword:
+
+| Your system | Platform keyword |
+| --- | --- |
+| macOS on Apple Silicon (M1 or later) | darwin_arm64 |
+| macOS on Intel | darwin_amd64 |
+| Linux on x86_64 | linux_amd64 |
+| Linux on ARM64 | linux_arm64 |
+
+Then replace `<platform>` in the commands below with your keyword, including the angle brackets. The example uses the current release, v1.1.0; for other versions, see the [releases page](https://github.com/syncronix-labs/aegora/releases).
+
+```sh
+curl -fsSLO https://github.com/syncronix-labs/aegora/releases/download/v1.1.0/aegora_1.1.0_<platform>.tar.gz
+tar -xzf aegora_1.1.0_<platform>.tar.gz
+./aegora --version
+```
+
+On macOS, if Gatekeeper refuses the unsigned binary, run `xattr -d com.apple.quarantine ./aegora` once and retry.
+
+To start the gateway, take the sample config, point its routes at your own services, and run:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/syncronix-labs/aegora/main/configs/aegora.yaml
+./aegora --config aegora.yaml
+```
+
+The gateway listens on port 8080, metrics on 9090, and the admin API on 9091. Go users can also install from source with `go install github.com/syncronix-labs/aegora/cmd/aegora@latest`.
+
+---
+
 ## Architecture
 
 ![Architecture](assets/architecture.svg)
