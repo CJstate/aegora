@@ -6,6 +6,10 @@ labels: ["enhancement"]
 assignees: []
 ---
 
+## Before Submitting
+- [ ] I checked the latest code on the main branch and this feature is not already implemented there.
+- [ ] I searched the existing issues and this is not a duplicate.
+
 ## Problem Statement
 A clear and concise description of the problem or limitation you are encountering. (For example, "I need to configure per-route rate limits because...")
 

@@ -6,6 +6,11 @@ labels: ["bug"]
 assignees: []
 ---
 
+## Before Submitting
+- [ ] I reproduced this bug against the latest code on the main branch (not an open pull request or a local branch).
+- [ ] I have noted the main branch commit SHA I tested with in the Environment section below.
+- [ ] I searched the existing issues and this is not a duplicate.
+
 ## Description
 A clear and concise description of what the bug is.
 
