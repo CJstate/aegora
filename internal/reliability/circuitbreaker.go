@@ -172,6 +172,19 @@ func (cb *CircuitBreaker) RecordFailure() {
 	}
 }
 
+// releaseProbe frees a Half-Open in-flight probe slot without recording a
+// success or failure outcome. It is used for errors that are the client's
+// fault rather than the upstream's, so they must not influence the breaker's
+// state while still not leaking the probe slot reserved by Allow().
+func (cb *CircuitBreaker) releaseProbe() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if cb.state == StateHalfOpen && cb.halfOpenInFlight > 0 {
+		cb.halfOpenInFlight--
+	}
+}
+
 // State returns the current state of the circuit breaker.
 func (cb *CircuitBreaker) State() State {
 	cb.mu.Lock()
@@ -188,7 +201,9 @@ type BreakerTransport struct {
 
 // RoundTrip executes the HTTP request through the circuit breaker.
 // Transport errors and responses with HTTP status >= 500 are recorded as failures;
-// all other responses are recorded as successes.
+// all other responses are recorded as successes. *http.MaxBytesError (the client
+// exceeded server.max_request_body_bytes) is the client's fault, not the
+// upstream's, so it releases the probe slot instead of recording a failure.
 func (b *BreakerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if b.Breaker != nil && !b.Breaker.Allow() {
 		return nil, ErrCircuitOpen
@@ -202,7 +217,12 @@ func (b *BreakerTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	resp, err := base.RoundTrip(req)
 	if err != nil {
 		if b.Breaker != nil {
-			b.Breaker.RecordFailure()
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				b.Breaker.releaseProbe()
+			} else {
+				b.Breaker.RecordFailure()
+			}
 		}
 		return nil, err
 	}

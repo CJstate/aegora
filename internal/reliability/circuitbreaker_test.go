@@ -363,4 +363,64 @@ func TestBreakerTransport(t *testing.T) {
 			t.Fatalf("expected open breaker after transport error, got %v", cb.State())
 		}
 	})
+
+	t.Run("oversized chunked body error does not trip closed breaker", func(t *testing.T) {
+		cb := NewCircuitBreaker(1, time.Minute, 1, 1)
+
+		stub := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return nil, &http.MaxBytesError{Limit: 10}
+		})
+
+		bt := &BreakerTransport{Base: stub, Breaker: cb}
+		req, _ := http.NewRequest(http.MethodPost, "http://example.com", nil)
+
+		resp, err := bt.RoundTrip(req)
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		var maxBytesErr *http.MaxBytesError
+		if !errors.As(err, &maxBytesErr) {
+			t.Fatalf("expected *http.MaxBytesError, got %v", err)
+		}
+		if cb.State() != StateClosed {
+			t.Fatalf("expected breaker to remain closed after client-fault oversized body error, got %v", cb.State())
+		}
+	})
+
+	t.Run("oversized chunked body error in half-open does not consume the probe outcome", func(t *testing.T) {
+		cb := NewCircuitBreaker(1, 10*time.Millisecond, 1, 1)
+		cb.RecordFailure() // open breaker
+		if cb.State() != StateOpen {
+			t.Fatalf("expected open state, got %v", cb.State())
+		}
+
+		time.Sleep(20 * time.Millisecond)
+
+		stub := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return nil, &http.MaxBytesError{Limit: 10}
+		})
+		bt := &BreakerTransport{Base: stub, Breaker: cb}
+		req, _ := http.NewRequest(http.MethodPost, "http://example.com", nil)
+
+		resp, err := bt.RoundTrip(req) // consumes the half-open probe slot
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		var maxBytesErr *http.MaxBytesError
+		if !errors.As(err, &maxBytesErr) {
+			t.Fatalf("expected *http.MaxBytesError, got %v", err)
+		}
+		if cb.State() != StateHalfOpen {
+			t.Fatalf("expected breaker to remain half-open after client-fault oversized body error, got %v", cb.State())
+		}
+
+		// A following healthy probe must still be allowed and should close the breaker.
+		if !cb.Allow() {
+			t.Fatal("expected healthy probe to be allowed after oversized-body error released its probe slot")
+		}
+		cb.RecordSuccess()
+		if cb.State() != StateClosed {
+			t.Fatalf("expected breaker to close after healthy probe following oversized-body error, got %v", cb.State())
+		}
+	})
 }
