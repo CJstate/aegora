@@ -253,18 +253,18 @@ func TestBuildHandler_MultiBackendRoutingAndStripPrefix(t *testing.T) {
 func TestBuildHandler_MaxRequestBody(t *testing.T) {
 	const limit = 16
 
-	var hits atomic.Int32
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		_, _ = io.Copy(io.Discard, r.Body)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer backend.Close()
-
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 
-	newHandler := func(t *testing.T, maxBody int64) http.Handler {
+	newHandler := func(t *testing.T, maxBody int64) (http.Handler, *atomic.Int32) {
 		t.Helper()
+		var hits atomic.Int32
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(backend.Close)
+
 		cfg := newTestConfig()
 		cfg.Routes[0].Targets = []string{backend.URL}
 		cfg.Server.MaxRequestBodyBytes = maxBody
@@ -272,7 +272,7 @@ func TestBuildHandler_MaxRequestBody(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildHandler: %v", err)
 		}
-		return h
+		return h, &hits
 	}
 
 	post := func(h http.Handler, size int) *httptest.ResponseRecorder {
@@ -283,8 +283,8 @@ func TestBuildHandler_MaxRequestBody(t *testing.T) {
 	}
 
 	t.Run("one byte over limit is rejected without upstream hit", func(t *testing.T) {
-		hits.Store(0)
-		rec := post(newHandler(t, limit), limit+1)
+		h, hits := newHandler(t, limit)
+		rec := post(h, limit+1)
 
 		if rec.Code != http.StatusRequestEntityTooLarge {
 			t.Fatalf("expected 413, got %d (body: %s)", rec.Code, rec.Body.String())
@@ -298,8 +298,8 @@ func TestBuildHandler_MaxRequestBody(t *testing.T) {
 	})
 
 	t.Run("body at limit is proxied", func(t *testing.T) {
-		hits.Store(0)
-		rec := post(newHandler(t, limit), limit)
+		h, hits := newHandler(t, limit)
+		rec := post(h, limit)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d (body: %s)", rec.Code, rec.Body.String())
@@ -310,10 +310,11 @@ func TestBuildHandler_MaxRequestBody(t *testing.T) {
 	})
 
 	t.Run("chunked body over limit returns 413", func(t *testing.T) {
+		h, _ := newHandler(t, limit)
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/upload", strings.NewReader(strings.Repeat("a", limit*4)))
 		req.ContentLength = -1 // unknown length, as with chunked transfer encoding
-		newHandler(t, limit).ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 
 		if rec.Code != http.StatusRequestEntityTooLarge {
 			t.Fatalf("expected 413, got %d (body: %s)", rec.Code, rec.Body.String())
@@ -324,8 +325,8 @@ func TestBuildHandler_MaxRequestBody(t *testing.T) {
 	})
 
 	t.Run("unset limit allows large bodies", func(t *testing.T) {
-		hits.Store(0)
-		rec := post(newHandler(t, 0), 1<<20)
+		h, hits := newHandler(t, 0)
+		rec := post(h, 1<<20)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d (body: %s)", rec.Code, rec.Body.String())
