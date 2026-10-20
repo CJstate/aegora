@@ -1,0 +1,239 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 830" role="img" aria-label="Aegora architecture diagram">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&amp;display=swap');
+  text { font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif; }
+  .flow, .flow-slow { stroke-dasharray: 8 6; }
+  .flow { animation: animate-flow 0.6s linear infinite; }
+  .flow-slow { animation: animate-flow 1.8s linear infinite; }
+  @keyframes animate-flow { from { stroke-dashoffset: 14; } to { stroke-dashoffset: 0; } }
+</style>
+<g clip-path="url(#cornerClip)">
+<rect width="100%" height="100%" fill="#0f172a"/>
+<defs>
+  <clipPath id="cornerClip"><rect x="0" y="0" width="1240" height="830" rx="24"/></clipPath>
+  <linearGradient id="gSlate" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#334155"/><stop offset="1" stop-color="#1e293b"/>
+  </linearGradient>
+  <linearGradient id="gGateway" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#2563eb"/><stop offset="1" stop-color="#1e40af"/>
+  </linearGradient>
+  <linearGradient id="gPink" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#9d174d"/><stop offset="1" stop-color="#831843"/>
+  </linearGradient>
+  <linearGradient id="gTeal" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#0f766e"/><stop offset="1" stop-color="#115e59"/>
+  </linearGradient>
+  <linearGradient id="gOcean" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#0369a1"/><stop offset="1" stop-color="#075985"/>
+  </linearGradient>
+  <linearGradient id="gAmber" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#b45309"/><stop offset="1" stop-color="#92400e"/>
+  </linearGradient>
+  <linearGradient id="gEmerald" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#15803d"/><stop offset="1" stop-color="#166534"/>
+  </linearGradient>
+  <linearGradient id="gCrimson" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#b91c1c"/><stop offset="1" stop-color="#991b1b"/>
+  </linearGradient>
+  <marker id="mSlate" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+  </marker>
+  <marker id="mGateway" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#3b82f6"/>
+  </marker>
+  <marker id="mPink" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#be185d"/>
+  </marker>
+  <marker id="mTeal" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#14b8a6"/>
+  </marker>
+  <marker id="mOcean" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#0ea5e9"/>
+  </marker>
+  <marker id="mAmber" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#f59e0b"/>
+  </marker>
+</defs>
+
+<!-- TOP ROW -->
+<rect x="40" y="30" width="160" height="70" rx="14" fill="url(#gSlate)"/>
+<text x="120" y="62" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">Client</text>
+<text x="120" y="84" text-anchor="middle" font-size="10" fill="#94a3b8">HTTP requests</text>
+
+<rect x="40" y="140" width="200" height="54" rx="12" fill="url(#gSlate)" stroke="#475569" stroke-width="1"/>
+<text x="140" y="164" text-anchor="middle" font-size="12.5" font-weight="700" fill="#f1f5f9">aegora.yaml</text>
+<text x="140" y="183" text-anchor="middle" font-size="10" fill="#94a3b8">+ AEGORA_* env overrides</text>
+<path d="M140 140 V120 H360 V104" fill="none" stroke="#64748b" stroke-width="2" class="flow-slow" marker-end="url(#mSlate)"/>
+<text x="250" y="112" text-anchor="middle" font-size="10" fill="#94a3b8">loaded once at startup</text>
+
+<path d="M204 65 H244" fill="none" stroke="#64748b" stroke-width="2.5" class="flow" marker-end="url(#mSlate)"/>
+
+<rect x="250" y="30" width="220" height="70" rx="14" fill="url(#gGateway)"/>
+<text x="360" y="60" text-anchor="middle" font-size="15" font-weight="800" fill="#ffffff">AEGORA GATEWAY</text>
+<text x="360" y="83" text-anchor="middle" font-size="10" fill="#bfdbfe">data plane · port 8080 · /livez /readyz</text>
+
+<rect x="540" y="30" width="200" height="70" rx="14" fill="url(#gPink)"/>
+<text x="640" y="60" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">Admin API · 9091</text>
+<text x="640" y="83" text-anchor="middle" font-size="10" fill="#fbcfe8">health · routes · config · reload</text>
+
+<rect x="770" y="30" width="200" height="70" rx="14" fill="url(#gPink)"/>
+<text x="870" y="60" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">Metrics · 9090</text>
+<text x="870" y="83" text-anchor="middle" font-size="10" fill="#fbcfe8">Prometheus RED metrics</text>
+
+<rect x="1000" y="30" width="200" height="70" rx="14" fill="url(#gPink)"/>
+<text x="1100" y="60" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">Tracing</text>
+<text x="1100" y="83" text-anchor="middle" font-size="10" fill="#fbcfe8">OpenTelemetry · stdout / OTLP</text>
+
+<path d="M640 100 V208" fill="none" stroke="#be185d" stroke-width="1.8" class="flow-slow" marker-end="url(#mPink)"/>
+<text x="650" y="150" font-size="9" fill="#f472b6">POST /admin/reload</text>
+<text x="650" y="166" font-size="9" fill="#f472b6">atomic handler swap</text>
+<path d="M870 100 V208" fill="none" stroke="#be185d" stroke-width="1.8" class="flow-slow" marker-end="url(#mPink)"/>
+<text x="880" y="158" font-size="9" fill="#f472b6">scrape /metrics</text>
+<path d="M1100 100 V208" fill="none" stroke="#be185d" stroke-width="1.8" class="flow-slow" marker-end="url(#mPink)"/>
+<text x="1110" y="158" font-size="9" fill="#f472b6">spans</text>
+
+<path d="M300 100 V160 H170 V256" fill="none" stroke="#3b82f6" stroke-width="2.5" class="flow" marker-end="url(#mGateway)"/>
+
+<!-- MIDDLEWARE BAND -->
+<rect x="40" y="215" width="1160" height="240" rx="18" fill="#0f172a" stroke="#115e59" stroke-width="1.2"/>
+<text x="64" y="242" font-size="11.5" font-weight="700" letter-spacing="2" fill="#5eead4">MIDDLEWARE CHAIN — BUILT ONCE AT STARTUP, SHARED BY EVERY REQUEST</text>
+
+<!-- Row 1 pills -->
+<g>
+  <rect x="70" y="262" width="200" height="62" rx="14" fill="url(#gTeal)"/>
+  <circle cx="88" cy="293" r="12" fill="#ffffff" opacity="0.15"/>
+  <text x="88" y="297" text-anchor="middle" font-size="11.5" font-weight="800" fill="#ffffff">1</text>
+  <text x="108" y="291" font-size="12.5" font-weight="700" fill="#ffffff">Recovery</text>
+  <text x="108" y="310" font-size="10" fill="#ccfbf1">panic guard</text>
+
+  <rect x="295" y="262" width="200" height="62" rx="14" fill="url(#gTeal)"/>
+  <circle cx="313" cy="293" r="12" fill="#ffffff" opacity="0.15"/>
+  <text x="313" y="297" text-anchor="middle" font-size="11.5" font-weight="800" fill="#ffffff">2</text>
+  <text x="333" y="291" font-size="12.5" font-weight="700" fill="#ffffff">RequestID</text>
+  <text x="333" y="310" font-size="10" fill="#ccfbf1">X-Request-Id on everything</text>
+
+  <rect x="520" y="262" width="200" height="62" rx="14" fill="url(#gTeal)"/>
+  <circle cx="538" cy="293" r="12" fill="#ffffff" opacity="0.15"/>
+  <text x="538" y="297" text-anchor="middle" font-size="11.5" font-weight="800" fill="#ffffff">3</text>
+  <text x="558" y="291" font-size="12.5" font-weight="700" fill="#ffffff">Tracing</text>
+  <text x="558" y="310" font-size="10" fill="#ccfbf1">OTel span, W3C traceparent</text>
+
+  <rect x="745" y="262" width="200" height="62" rx="14" fill="url(#gTeal)"/>
+  <circle cx="763" cy="293" r="12" fill="#ffffff" opacity="0.15"/>
+  <text x="763" y="297" text-anchor="middle" font-size="11.5" font-weight="800" fill="#ffffff">4</text>
+  <text x="783" y="291" font-size="12.5" font-weight="700" fill="#ffffff">Metrics</text>
+  <text x="783" y="310" font-size="10" fill="#ccfbf1">RED counters + latency</text>
+
+  <rect x="970" y="262" width="200" height="62" rx="14" fill="url(#gTeal)"/>
+  <circle cx="988" cy="293" r="12" fill="#ffffff" opacity="0.15"/>
+  <text x="988" y="297" text-anchor="middle" font-size="11.5" font-weight="800" fill="#ffffff">5</text>
+  <text x="1008" y="291" font-size="12.5" font-weight="700" fill="#ffffff">AccessLog</text>
+  <text x="1008" y="310" font-size="10" fill="#ccfbf1">slog JSON, final status</text>
+</g>
+
+<!-- Row 1 arrows -->
+<path d="M270 293 H289" stroke="#14b8a6" stroke-width="2.5" class="flow" marker-end="url(#mTeal)"/>
+<path d="M495 293 H514" stroke="#14b8a6" stroke-width="2.5" class="flow" marker-end="url(#mTeal)"/>
+<path d="M720 293 H739" stroke="#14b8a6" stroke-width="2.5" class="flow" marker-end="url(#mTeal)"/>
+<path d="M945 293 H964" stroke="#14b8a6" stroke-width="2.5" class="flow" marker-end="url(#mTeal)"/>
+<!-- Turn down -->
+<path d="M1070 328 V356" stroke="#14b8a6" stroke-width="2.5" class="flow" marker-end="url(#mTeal)"/>
+
+<!-- Row 2 pills (flow runs right to left) -->
+<g>
+  <rect x="970" y="362" width="200" height="62" rx="14" fill="url(#gTeal)"/>
+  <circle cx="988" cy="393" r="12" fill="#ffffff" opacity="0.15"/>
+  <text x="988" y="397" text-anchor="middle" font-size="11.5" font-weight="800" fill="#ffffff">6</text>
+  <text x="1008" y="391" font-size="12.5" font-weight="700" fill="#ffffff">Body Limit</text>
+  <text x="1008" y="410" font-size="10" fill="#ccfbf1">413 over max_body_bytes</text>
+
+  <rect x="745" y="362" width="200" height="62" rx="14" fill="url(#gTeal)"/>
+  <circle cx="763" cy="393" r="12" fill="#ffffff" opacity="0.15"/>
+  <text x="763" y="397" text-anchor="middle" font-size="11.5" font-weight="800" fill="#ffffff">7</text>
+  <text x="783" y="391" font-size="12.5" font-weight="700" fill="#ffffff">Shedding</text>
+  <text x="783" y="410" font-size="10" fill="#ccfbf1">AIMD on p99 · priority floor</text>
+
+  <rect x="520" y="362" width="200" height="62" rx="14" fill="url(#gTeal)"/>
+  <circle cx="538" cy="393" r="12" fill="#ffffff" opacity="0.15"/>
+  <text x="538" y="397" text-anchor="middle" font-size="11.5" font-weight="800" fill="#ffffff">8</text>
+  <text x="558" y="391" font-size="12.5" font-weight="700" fill="#ffffff">Rate Limit</text>
+  <text x="558" y="410" font-size="10" fill="#ccfbf1">sliding window · token bucket</text>
+
+  <rect x="295" y="362" width="200" height="62" rx="14" fill="url(#gTeal)"/>
+  <circle cx="313" cy="393" r="12" fill="#ffffff" opacity="0.15"/>
+  <text x="313" y="397" text-anchor="middle" font-size="11.5" font-weight="800" fill="#ffffff">9</text>
+  <text x="333" y="391" font-size="12.5" font-weight="700" fill="#ffffff">Cache</text>
+  <text x="333" y="410" font-size="10" fill="#ccfbf1">L1 + L2 · ETag / 304 · X-Cache</text>
+
+  <rect x="70" y="362" width="200" height="62" rx="14" fill="url(#gTeal)"/>
+  <circle cx="88" cy="393" r="12" fill="#ffffff" opacity="0.15"/>
+  <text x="88" y="397" text-anchor="middle" font-size="11.5" font-weight="800" fill="#ffffff">10</text>
+  <text x="108" y="391" font-size="12.5" font-weight="700" fill="#ffffff">Queue</text>
+  <text x="108" y="410" font-size="10" fill="#ccfbf1">priority admission · CoDel</text>
+</g>
+
+<!-- Row 2 arrows (pointing left) -->
+<path d="M970 393 H951" stroke="#14b8a6" stroke-width="2.5" class="flow" marker-end="url(#mTeal)"/>
+<path d="M745 393 H726" stroke="#14b8a6" stroke-width="2.5" class="flow" marker-end="url(#mTeal)"/>
+<path d="M520 393 H501" stroke="#14b8a6" stroke-width="2.5" class="flow" marker-end="url(#mTeal)"/>
+<path d="M295 393 H276" stroke="#14b8a6" stroke-width="2.5" class="flow" marker-end="url(#mTeal)"/>
+
+<text x="64" y="447" font-size="10" fill="#94a3b8">Cache hits are served here and skip the queue and the upstream call entirely. Steps 6 to 10 are optional and config-gated.</text>
+
+<!-- Exit to routing -->
+<path d="M170 428 V514" fill="none" stroke="#14b8a6" stroke-width="2.5" class="flow" marker-end="url(#mTeal)"/>
+
+<!-- ROUTING ROW -->
+<text x="40" y="492" font-size="11.5" font-weight="700" letter-spacing="2" fill="#38bdf8">ROUTING AND UPSTREAM TRANSPORT</text>
+
+<rect x="40" y="520" width="200" height="84" rx="14" fill="url(#gOcean)"/>
+<text x="140" y="552" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">Router</text>
+<text x="140" y="573" text-anchor="middle" font-size="10" fill="#bae6fd">regex first, longest prefix</text>
+<text x="140" y="590" text-anchor="middle" font-size="10" fill="#bae6fd">no match → 404</text>
+
+<rect x="280" y="520" width="220" height="84" rx="14" fill="url(#gOcean)"/>
+<text x="390" y="552" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">Upstream Pool</text>
+<text x="390" y="573" text-anchor="middle" font-size="10" fill="#bae6fd">round robin · least conns</text>
+<text x="390" y="590" text-anchor="middle" font-size="10" fill="#bae6fd">passive health, 30s cool</text>
+
+<rect x="540" y="520" width="220" height="84" rx="14" fill="url(#gAmber)"/>
+<text x="650" y="552" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">Circuit Breaker</text>
+<text x="650" y="573" text-anchor="middle" font-size="10" fill="#fde68a">1 per route · closed/open/half</text>
+<text x="650" y="590" text-anchor="middle" font-size="10" fill="#fde68a">open → 503 fail fast</text>
+
+<rect x="800" y="520" width="200" height="84" rx="14" fill="url(#gAmber)"/>
+<text x="900" y="552" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">Retry</text>
+<text x="900" y="573" text-anchor="middle" font-size="10" fill="#fde68a">exp backoff, full jitter</text>
+<text x="900" y="590" text-anchor="middle" font-size="10" fill="#fde68a">idempotent requests only</text>
+
+<!-- Upstreams (stacked) -->
+<rect x="1042" y="512" width="160" height="84" rx="14" fill="#064e3b"/>
+<rect x="1034" y="520" width="166" height="84" rx="14" fill="url(#gEmerald)"/>
+<text x="1117" y="552" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">Upstreams</text>
+<text x="1117" y="573" text-anchor="middle" font-size="10" fill="#86efac">your services, reverse proxied</text>
+<text x="1117" y="590" text-anchor="middle" font-size="10" fill="#86efac">StripPrefix applied per route</text>
+
+<path d="M244 562 H274" stroke="#0ea5e9" stroke-width="2.5" class="flow" marker-end="url(#mOcean)"/>
+<path d="M504 562 H534" stroke="#0ea5e9" stroke-width="2.5" class="flow" marker-end="url(#mOcean)"/>
+<path d="M764 562 H794" stroke="#f59e0b" stroke-width="2.5" class="flow" marker-end="url(#mAmber)"/>
+<path d="M1004 562 H1028" stroke="#f59e0b" stroke-width="2.5" class="flow" marker-end="url(#mAmber)"/>
+
+<text x="650" y="640" text-anchor="middle" font-size="10" fill="#94a3b8">The breaker records the retry loop's final outcome, not each attempt. Client faults (413) are never counted as upstream failures.</text>
+
+<!-- REDIS + SEMANTICS -->
+<path d="M395 428 V478 H250 V704" fill="none" stroke="#14b8a6" stroke-width="2" class="flow-slow" marker-end="url(#mTeal)"/>
+<text x="258" y="470" font-size="10" fill="#14b8a6">L2 cache read / write</text>
+<path d="M620 428 V478 H782 V648 H560 V704" fill="none" stroke="#14b8a6" stroke-width="2" class="flow-slow" marker-end="url(#mTeal)"/>
+<text x="700" y="470" text-anchor="middle" font-size="10" fill="#14b8a6">limiter state</text>
+
+<rect x="200" y="712" width="460" height="84" rx="14" fill="url(#gCrimson)"/>
+<text x="430" y="744" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">Redis (optional)</text>
+<text x="430" y="765" text-anchor="middle" font-size="10" fill="#fecaca">shared rl counters · cache L2 (write-thru + backfill)</text>
+<text x="430" y="782" text-anchor="middle" font-size="10" fill="#fecaca">keys: aegora:rl:* · aegora:cache:v1:* · fails open</text>
+
+<rect x="700" y="712" width="500" height="84" rx="14" fill="#1e293b" stroke="#334155" stroke-width="1.2"/>
+<text x="724" y="740" font-size="11.5" font-weight="700" letter-spacing="1.5" fill="#94a3b8">RESPONSE SEMANTICS</text>
+<text x="724" y="764" font-size="10.5" fill="#cbd5e1"><tspan fill="#fcd34d" font-weight="700">413</tspan> body too large · <tspan fill="#fcd34d" font-weight="700">429</tspan> rate limited (Retry-After) · <tspan fill="#fcd34d" font-weight="700">503</tspan> breaker open / shed</text>
+<text x="724" y="784" font-size="10.5" fill="#cbd5e1"><tspan fill="#fcd34d" font-weight="700">502</tspan> bad gateway / all upstreams down · X-Cache: HIT / MISS · Age on hits</text>
+</g>
+</svg>

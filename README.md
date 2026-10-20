@@ -41,6 +41,47 @@ Envoy. Aegora packs the overload story into a single Go binary.
 
 ---
 
+## Architecture
+
+![Architecture](assets/architecture.svg)
+
+Incoming requests traverse the middleware pipeline in order:
+
+```text
+Client -> Recovery -> RequestID -> Tracing -> Metrics -> AccessLog -> BodyLimit -> Shedding -> RateLimit -> Cache -> Queue -> Gateway -> Upstreams
+```
+
+### Request Walkthrough
+
+- Request lands on `:8080`. Recovery, RequestID, Tracing, Metrics and AccessLog wrap every request, including rejections.
+- Body Limit rejects oversized bodies with 413 before they can spend shedding, rate-limit or queue budget.
+- Shedding (AIMD) watches p99 latency and trims the admit rate under overload; high-priority paths keep a floor.
+- Rate Limit runs before Cache, so limits apply per key (IP or API key) even for cached responses.
+- Cache hits return here and skip the queue and the upstream entirely. Misses fall through.
+- Queue admits by priority with CoDel, then the Router matches and the Pool picks a healthy target.
+- The breaker wraps the retry loop. The final outcome is what gets recorded against route health.
+
+### Ports
+
+| Port | Surface |
+|---|---|
+| `8080` | Gateway data plane (proxied traffic, `/livez`, `/readyz`) |
+| `9090` | Prometheus metrics endpoint |
+| `9091` | Admin API: health, routes, config, reload |
+| `6379` | Redis, only when rate limiting or cache L2 uses it |
+
+Config loads once at startup from `aegora.yaml`. Edits take effect only after `POST /admin/reload`, which rebuilds the handler and swaps it atomically. Reload reports which sections applied and which were skipped (restart-only).
+
+### Design Choices Worth Knowing
+
+- Chain is built once at startup and shared, never rebuilt per request. Reload builds a new one and swaps the pointer.
+- Client faults are not upstream faults. Oversized bodies return 413 without touching breaker or pool health.
+- Redis fails open. If Redis is down, rate limiting and cache L2 degrade quietly instead of taking the gateway down.
+- Cache write order is L1 then L2, and L2 TTL must be at least the L1 TTL, or entries vanish between the tiers.
+- Response writers stay minimal. Wrappers implement only `http.ResponseWriter`; an extra `Flush()` once made the proxy treat responses as streaming and silently broke cache storage.
+
+---
+
 ## Features
 
 ### Routing
@@ -71,21 +112,6 @@ Envoy. Aegora packs the overload story into a single Go binary.
 - **Admin API**: Dedicated HTTP listener on port `9091` for health checks, route queries, and configuration snapshots.
 - **Hot Reload**: Atomic configuration reload via `POST /admin/reload` without dropping connections.
 - **Container Packaging**: Multi-stage Dockerfile and Docker Compose environment.
-
----
-
-## Architecture
-
-Incoming requests traverse the middleware pipeline in order:
-
-```text
-Client -> Recovery -> RequestID -> Tracing -> Metrics -> AccessLog -> Shedding -> RateLimit -> Cache -> Queue -> Gateway -> Upstreams
-```
-
-Sidecars and auxiliary ports:
-- **Redis (`6379`)**: Distributed rate limit counters and L2 response cache.
-- **Prometheus (`9090`)**: `/metrics` telemetry scraping.
-- **Admin API (`9091`)**: `/admin/health`, `/admin/routes`, `/admin/config`, `/admin/reload`.
 
 ---
 
