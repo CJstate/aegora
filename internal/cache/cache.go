@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/syncronix-labs/aegora/internal/middleware"
+	"golang.org/x/sync/singleflight"
 )
 
 // Entry represents a cached HTTP response.
@@ -212,8 +213,22 @@ func etagMatches(ifNoneMatch, etag string) bool {
 }
 
 // Middleware constructs an HTTP middleware that provides response caching.
+//
+// Request Coalescing (cache stampede protection):
+// Concurrent misses for the same cache key are collapsed with singleflight. The first
+// request (the leader) runs the downstream handler; requests for the same key arriving
+// while it is in flight (followers) wait and are served the leader's response from the
+// resulting cache entry, so N simultaneous misses produce one backend call.
+//
+// Only cache-eligible responses are shared. If the leader's response is not stored
+// (non-200 status, Set-Cookie, Cache-Control no-store, body over maxBodyBytes) or the
+// leader panics, each follower calls the downstream handler itself and observes its own
+// outcome. Failures are therefore never fanned out to other callers. Requests carrying
+// Cache-Control no-store are never cached, so they skip coalescing entirely.
 func Middleware(store Store, ttl time.Duration, maxBodyBytes int) middleware.Middleware {
 	return func(next http.Handler) http.Handler {
+		var group singleflight.Group
+
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Rule: GET and HEAD only; everything else bypasses untouched with no X-Cache header.
 			if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -232,89 +247,142 @@ func Middleware(store Store, ttl time.Duration, maxBodyBytes int) middleware.Mid
 
 			// Attempt cache hit
 			if entry, hit := store.Get(cacheKey); hit {
-				age := int64(0)
-				if !entry.StoredAt.IsZero() {
-					age = max(0, int64(time.Since(entry.StoredAt)/time.Second))
-				}
-				// Evaluate If-None-Match conditional request
-				ifNoneMatch := r.Header.Get("If-None-Match")
-				if entry.ETag != "" && ifNoneMatch != "" && etagMatches(ifNoneMatch, entry.ETag) {
-					for k, vv := range entry.Header {
-						for _, v := range vv {
-							w.Header().Add(k, v)
-						}
-					}
-					w.Header().Set("X-Cache", "HIT")
-					w.Header().Set("Age", strconv.FormatInt(age, 10))
-					w.WriteHeader(http.StatusNotModified)
-					return
-				}
+				serveEntry(w, r, entry, "HIT")
+				return
+			}
 
-				// Fresh cache hit: serve cached status, headers, and body
-				for k, vv := range entry.Header {
-					for _, v := range vv {
-						w.Header().Add(k, v)
+			// A no-store request is never cached, so there is nothing to share with others.
+			if strings.Contains(strings.ToLower(r.Header.Get("Cache-Control")), "no-store") {
+				fetchAndStore(w, r, next, store, cacheKey, ttl, maxBodyBytes)
+				return
+			}
+
+			// Cache miss: coalesce concurrent misses for the same key. singleflight runs fn
+			// synchronously in the leader's goroutine, so leader and leaderPanic are not shared.
+			leader := false
+			var leaderPanic any
+			v, _, _ := group.Do(cacheKey, func() (result any, err error) {
+				leader = true
+				// Recover here so a leader panic (e.g. http.ErrAbortHandler from a disconnected
+				// client) is re-raised only for the leader instead of in every follower.
+				defer func() {
+					if p := recover(); p != nil {
+						leaderPanic = p
+						result = (*Entry)(nil)
 					}
-				}
-				w.Header().Set("X-Cache", "HIT")
-				w.Header().Set("Age", strconv.FormatInt(age, 10))
-				w.WriteHeader(entry.Status)
-				if r.Method != http.MethodHead {
-					_, _ = w.Write(entry.Body)
+				}()
+				return fetchAndStore(w, r, next, store, cacheKey, ttl, maxBodyBytes), nil
+			})
+
+			if leader {
+				if leaderPanic != nil {
+					panic(leaderPanic)
 				}
 				return
 			}
 
-			// Cache miss: execute downstream handler with response buffering
-			rw := newCachingResponseWriter(w, maxBodyBytes)
-			rw.Header().Set("X-Cache", "MISS")
-
-			next.ServeHTTP(rw, r)
-
-			// If the response already streamed due to buffer overflow, do not store.
-			if rw.overflow {
+			// Follower: share the leader's cacheable response, or fetch independently.
+			if entry, _ := v.(*Entry); entry != nil {
+				serveEntry(w, r, entry, "MISS")
 				return
 			}
-
-			bodyBytes := rw.buf.Bytes()
-
-			// Cache Eligibility Rules (all must hold):
-			// 1. Status == 200: Only successful OK responses are safe to cache.
-			// 2. Request Cache-Control: Request must not carry "no-store".
-			// 3. Response Cache-Control: Response must not carry "no-store".
-			// 4. No Set-Cookie: Responses setting cookies are user-specific and must not be shared.
-			// 5. Body within maxBodyBytes: Prevent memory bloat from oversized payloads.
-			reqNoStore := strings.Contains(strings.ToLower(r.Header.Get("Cache-Control")), "no-store")
-			respNoStore := strings.Contains(strings.ToLower(rw.header.Get("Cache-Control")), "no-store")
-			hasSetCookie := rw.header.Get("Set-Cookie") != ""
-			isEligible := rw.status == http.StatusOK && !reqNoStore && !respNoStore && !hasSetCookie && len(bodyBytes) <= maxBodyBytes
-
-			if isEligible {
-				// Determine ETag: keep backend ETag if provided, else compute weak ETag
-				// W/"<hex>" from first 16 hex chars (8 bytes) of SHA-256(body).
-				etag := rw.header.Get("ETag")
-				if etag == "" {
-					sum := sha256.Sum256(bodyBytes)
-					etag = fmt.Sprintf("W/\"%s\"", hex.EncodeToString(sum[:8]))
-					rw.header.Set("ETag", etag)
-				}
-
-				now := time.Now()
-				entry := &Entry{
-					Status:    rw.status,
-					Header:    rw.header.Clone(),
-					Body:      bytes.Clone(bodyBytes),
-					StoredAt:  now,
-					ExpiresAt: now.Add(ttl),
-					ETag:      etag,
-				}
-				store.Put(cacheKey, entry)
-			}
-
-			// Flush captured response to the client
-			rw.flushToUnderlying()
+			fetchAndStore(w, r, next, store, cacheKey, ttl, maxBodyBytes)
 		})
 	}
+}
+
+// serveEntry writes a cached entry to w, answering 304 Not Modified when the request's
+// If-None-Match matches the entry's ETag. xCache is the X-Cache header value to report.
+func serveEntry(w http.ResponseWriter, r *http.Request, entry *Entry, xCache string) {
+	age := int64(0)
+	if !entry.StoredAt.IsZero() {
+		age = max(0, int64(time.Since(entry.StoredAt)/time.Second))
+	}
+
+	for k, vv := range entry.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("X-Cache", xCache)
+	w.Header().Set("Age", strconv.FormatInt(age, 10))
+
+	// Evaluate If-None-Match conditional request
+	ifNoneMatch := r.Header.Get("If-None-Match")
+	if entry.ETag != "" && ifNoneMatch != "" && etagMatches(ifNoneMatch, entry.ETag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	// Fresh entry: serve cached status, headers, and body
+	w.WriteHeader(entry.Status)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(entry.Body)
+	}
+}
+
+// fetchAndStore runs the downstream handler with response buffering, stores the response
+// if it is cache-eligible, and writes it to w. It returns the stored entry, or nil if the
+// response was not stored.
+func fetchAndStore(
+	w http.ResponseWriter,
+	r *http.Request,
+	next http.Handler,
+	store Store,
+	cacheKey string,
+	ttl time.Duration,
+	maxBodyBytes int,
+) *Entry {
+	rw := newCachingResponseWriter(w, maxBodyBytes)
+	rw.Header().Set("X-Cache", "MISS")
+
+	next.ServeHTTP(rw, r)
+
+	// If the response already streamed due to buffer overflow, do not store.
+	if rw.overflow {
+		return nil
+	}
+
+	bodyBytes := rw.buf.Bytes()
+
+	// Cache Eligibility Rules (all must hold):
+	// 1. Status == 200: Only successful OK responses are safe to cache.
+	// 2. Request Cache-Control: Request must not carry "no-store".
+	// 3. Response Cache-Control: Response must not carry "no-store".
+	// 4. No Set-Cookie: Responses setting cookies are user-specific and must not be shared.
+	// 5. Body within maxBodyBytes: Prevent memory bloat from oversized payloads.
+	reqNoStore := strings.Contains(strings.ToLower(r.Header.Get("Cache-Control")), "no-store")
+	respNoStore := strings.Contains(strings.ToLower(rw.header.Get("Cache-Control")), "no-store")
+	hasSetCookie := rw.header.Get("Set-Cookie") != ""
+	isEligible := rw.status == http.StatusOK && !reqNoStore && !respNoStore && !hasSetCookie && len(bodyBytes) <= maxBodyBytes
+
+	var entry *Entry
+	if isEligible {
+		// Determine ETag: keep backend ETag if provided, else compute weak ETag
+		// W/"<hex>" from first 16 hex chars (8 bytes) of SHA-256(body).
+		etag := rw.header.Get("ETag")
+		if etag == "" {
+			sum := sha256.Sum256(bodyBytes)
+			etag = fmt.Sprintf("W/\"%s\"", hex.EncodeToString(sum[:8]))
+			rw.header.Set("ETag", etag)
+		}
+
+		now := time.Now()
+		entry = &Entry{
+			Status:    rw.status,
+			Header:    rw.header.Clone(),
+			Body:      bytes.Clone(bodyBytes),
+			StoredAt:  now,
+			ExpiresAt: now.Add(ttl),
+			ETag:      etag,
+		}
+		store.Put(cacheKey, entry)
+	}
+
+	// Flush captured response to the client
+	rw.flushToUnderlying()
+
+	return entry
 }
 
 // requestCacheKey returns a stable cache key for a request. Query values are

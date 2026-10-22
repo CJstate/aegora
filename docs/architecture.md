@@ -30,7 +30,7 @@ Applies an AIMD (Additive Increase / Multiplicative Decrease) control loop that 
 Enforces client-level request limits using sliding-window timestamp logs or token bucket refill rates, partitioned by remote IP address or API key. Requests exceeding quotas are rejected with 429 Too Many Requests and a `Retry-After` header. It sits before response caching and queueing to enforce quotas uniformly, regardless of whether a response will be served from cache or upstream.
 
 ### 8. Response Cache
-Evaluates cache eligibility for GET and HEAD requests. On a cache hit, it inspects `If-None-Match` to serve 304 Not Modified when ETags match, or directly returns cached headers and body with `X-Cache: HIT`. Cache hits bypass the admission queue and upstream reverse proxy entirely. On a cache miss, it wraps the writer to capture eligible 200 responses for storage in L1 memory and L2 Redis.
+Evaluates cache eligibility for GET and HEAD requests. On a cache hit, it inspects `If-None-Match` to serve 304 Not Modified when ETags match, or directly returns cached headers and body with `X-Cache: HIT`. Cache hits bypass the admission queue and upstream reverse proxy entirely. On a cache miss, it wraps the writer to capture eligible 200 responses for storage in L1 memory and L2 Redis. Concurrent misses for the same key are coalesced so that only one of them reaches the upstream.
 
 ### 9. Admission Queue
 Enforces strict concurrency limits (`max_inflight`) and queue depth bounds (`max_queue_depth`) fronting upstream connections. It classifies requests into priority buckets (high, normal, low) and applies CoDel (Controlled Delay) drop logic to discard requests whose queue dwell times exceed latency targets. This protects upstream connection pools from connection stampedes and bufferbloat.
@@ -56,6 +56,11 @@ Configuration hot reloading via `POST /admin/reload` creates an entirely new HTT
 
 ### Multi-Tier Cache with Write-Through and Backfill
 The caching subsystem implements a Store interface with a two-tier strategy. Reads first query local L1 memory. On an L1 miss, the store checks L2 Redis. If present in Redis, the entry is returned and backfilled into local L1 memory for future requests. Writes execute as a write-through operation, updating both L1 memory and L2 Redis simultaneously. If Redis is temporarily unreachable, the gateway degrades gracefully to standalone L1 operation.
+
+### Request Coalescing on Cache Miss
+When many requests for the same uncached key arrive at once (a cache stampede, or "thundering herd"), every one of them would otherwise miss and hit the upstream, multiplying load on a backend that may already be recovering. The cache middleware collapses concurrent misses per key with `golang.org/x/sync/singleflight`: the first request (the leader) calls the upstream, and requests arriving while it is in flight (followers) wait and are served the leader's response from the resulting cache entry, including `If-None-Match` evaluation.
+
+Only cache-eligible responses are shared. If the leader's response is not stored (non-200, `Set-Cookie`, `no-store`, or larger than `max_body_bytes`), or the leader panics, each follower calls the upstream itself and observes its own outcome, so failures are never fanned out to other clients. The trade-off is that coalescing protects the upstream while it returns successful responses; during an error burst, followers retry independently. Requests carrying `Cache-Control: no-store` skip coalescing because they are never cached.
 
 ### W3C Trace Context Propagation
 Aegora wraps its shared HTTP base transport with `otelhttp.NewTransport`. As requests pass through Go's `httputil.ReverseProxy`, the active trace context stored within the request's `context.Context` is automatically injected into outgoing HTTP request headers as `traceparent` and `tracestate`. This enables end-to-end distributed tracing across microservices with zero manual header injection in the proxy loop.
