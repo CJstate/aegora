@@ -10,8 +10,28 @@ multi-tier caching, and AIMD load shedding for upstream services.
 Aegora is an HTTP/1.1 reverse proxy and reliability gateway built in Go. It protects upstream services from overload, cascading failures, latency spikes, and traffic surges through defensive middleware, multi-tier caching, dynamic queueing, adaptive load shedding, and observability.
 
 ![Config hot reload demo](assets/demo-hot-reload.gif)
-*Live config reload: the rate limit tightens from 60 to 3 requests per
-minute on a running gateway. 200 200 200 429 429, zero restarts.*
+_Live config reload: the rate limit tightens from 60 to 3 requests per
+minute on a running gateway. 200 200 200 429 429, zero restarts._
+
+## Table of Contents
+
+- [Why Aegora?](#why-aegora)
+- [Install](#install)
+- [Architecture](#architecture)
+  - [Request Walkthrough](#request-walkthrough)
+  - [Ports](#ports)
+  - [Design Choices Worth Knowing](#design-choices-worth-knowing)
+- [Features](#features)
+- [Quickstart](#quickstart)
+  - [Building a Versioned Image](#building-a-versioned-image)
+  - [Verify Operations](#verify-operations)
+- [Configuration](#configuration)
+- [Admin API](#admin-api)
+- [Benchmarks](#benchmarks)
+- [Documentation](#documentation)
+- [Project Status](#project-status)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Why Aegora?
 
@@ -45,12 +65,12 @@ Envoy. Aegora packs the overload story into a single Go binary.
 
 Download the release binary for your system and run it. First, find your platform keyword:
 
-| Your system | Platform keyword |
-| --- | --- |
-| macOS on Apple Silicon (M1 or later) | darwin_arm64 |
-| macOS on Intel | darwin_amd64 |
-| Linux on x86_64 | linux_amd64 |
-| Linux on ARM64 | linux_arm64 |
+| Your system                          | Platform keyword |
+| ------------------------------------ | ---------------- |
+| macOS on Apple Silicon (M1 or later) | darwin_arm64     |
+| macOS on Intel                       | darwin_amd64     |
+| Linux on x86_64                      | linux_amd64      |
+| Linux on ARM64                       | linux_arm64      |
 
 Then replace `<platform>` in the commands below with your keyword, including the angle brackets. The example uses the current release, v1.1.0; for other versions, see the [releases page](https://github.com/syncronix-labs/aegora/releases).
 
@@ -95,12 +115,12 @@ Client -> Recovery -> RequestID -> Tracing -> Metrics -> AccessLog -> BodyLimit 
 
 ### Ports
 
-| Port | Surface |
-|---|---|
+| Port   | Surface                                                   |
+| ------ | --------------------------------------------------------- |
 | `8080` | Gateway data plane (proxied traffic, `/livez`, `/readyz`) |
-| `9090` | Prometheus metrics endpoint |
-| `9091` | Admin API: health, routes, config, reload |
-| `6379` | Redis, only when rate limiting or cache L2 uses it |
+| `9090` | Prometheus metrics endpoint                               |
+| `9091` | Admin API: health, routes, config, reload                 |
+| `6379` | Redis, only when rate limiting or cache L2 uses it        |
 
 Config loads once at startup from `aegora.yaml`. Edits take effect only after `POST /admin/reload`, which rebuilds the handler and swaps it atomically. Reload reports which sections applied and which were skipped (restart-only).
 
@@ -117,12 +137,14 @@ Config loads once at startup from `aegora.yaml`. Edits take effect only after `P
 ## Features
 
 ### Routing
+
 - **Path Matching**: Prefix and regex route matching with HTTP method and header constraints.
 - **Load Balancing**: Round-robin and least-connections upstream selection.
 - **Passive Health Checking**: Target failure detection with automatic recovery.
 - **Path Rewriting**: Optional prefix stripping before forwarding to upstreams.
 
 ### Resilience
+
 - **Rate Limiting**: Sliding window and token bucket limiters by client IP or API key, with in-memory or Redis backends.
 - **Circuit Breaker**: Closed, open, and half-open state machine per route.
 - **Retry Policies**: Idempotent request retries with exponential backoff and full jitter.
@@ -131,16 +153,19 @@ Config loads once at startup from `aegora.yaml`. Edits take effect only after `P
 - **Adaptive Load Shedding**: AIMD controller throttling lower-priority traffic when P99 latency exceeds target.
 
 ### Performance
+
 - **Multi-Tier Caching**: In-memory L1 cache with distributed Redis L2 storage.
 - **Conditional Validation**: `ETag` generation and `If-None-Match` 304 evaluation.
 - **Safe Cache Semantics**: Automatic bypass on `Authorization`, `no-store`, or `Set-Cookie`.
 
 ### Observability
+
 - **Prometheus Metrics**: `/metrics` endpoint with RED method counters, duration histograms, and inflight gauges.
 - **OpenTelemetry Tracing**: W3C tracecontext propagation with stdout or OTLP exporters and configurable sampling.
 - **Structured Logging**: `log/slog` output with request IDs, status codes, latency, and client details.
 
 ### Operations
+
 - **Admin API**: Dedicated HTTP listener on port `9091` for health checks, route queries, and configuration snapshots.
 - **Hot Reload**: Atomic configuration reload via `POST /admin/reload` without dropping connections.
 - **Container Packaging**: Multi-stage Dockerfile and Docker Compose environment.
@@ -176,7 +201,9 @@ Send a request through the gateway to verify routing and load balancing:
 ```bash
 curl -i http://localhost:8080/api/users
 ```
+
 Expected response:
+
 ```http
 HTTP/1.1 200 OK
 Content-Type: text/plain; charset=utf-8
@@ -191,7 +218,9 @@ Send the same request again to test the response cache:
 ```bash
 curl -i http://localhost:8080/api/users
 ```
+
 Expected response:
+
 ```http
 HTTP/1.1 200 OK
 Content-Type: text/plain; charset=utf-8
@@ -233,29 +262,29 @@ Here is a minimal annotated example configuring a listener, an upstream route, a
 
 ```yaml
 server:
-  addr: "0.0.0.0:8080"        # Ingress port for incoming data-plane traffic
+  addr: "0.0.0.0:8080" # Ingress port for incoming data-plane traffic
   read_timeout: "30s"
   write_timeout: "30s"
   idle_timeout: "60s"
 
 routes:
   - name: "api-service"
-    path_prefix: "/api"       # Match requests starting with /api
+    path_prefix: "/api" # Match requests starting with /api
     methods:
       - "GET"
       - "POST"
     targets:
       - "http://127.0.0.1:8081"
       - "http://127.0.0.1:8082"
-    strip_prefix: "/api"      # Forward request without /api prefix to backend
-    lb: "round_robin"         # Selection policy: round_robin or least_connections
+    strip_prefix: "/api" # Forward request without /api prefix to backend
+    lb: "round_robin" # Selection policy: round_robin or least_connections
 
 rate_limit:
   enabled: true
-  limiter: "sliding_window"   # sliding_window or token_bucket
-  max_requests: 120           # Maximum requests allowed within window
+  limiter: "sliding_window" # sliding_window or token_bucket
+  max_requests: 120 # Maximum requests allowed within window
   window: "1m"
-  key: "ip"                   # Rate limit partition: ip or api_key
+  key: "ip" # Rate limit partition: ip or api_key
 
 observability:
   log_level: "info"
@@ -263,7 +292,7 @@ observability:
 
 admin:
   enabled: true
-  addr: "0.0.0.0:9091"         # Dedicated management interface
+  addr: "0.0.0.0:9091" # Dedicated management interface
 ```
 
 ---
@@ -272,12 +301,12 @@ admin:
 
 Aegora provides a separate administrative server listening on port `9091` by default. Keeping administration isolated from the data plane prevents management commands from contending with customer traffic.
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/admin/health` | Liveness verification and binary build version |
-| `GET` | `/admin/routes` | JSON array of active route rules, match prefixes, target pools, and policies |
-| `GET` | `/admin/config` | Runtime snapshot of the active server configuration |
-| `POST` | `/admin/reload` | Trigger hot reload of configuration from disk without downtime |
+| Method | Path            | Purpose                                                                      |
+| ------ | --------------- | ---------------------------------------------------------------------------- |
+| `GET`  | `/admin/health` | Liveness verification and binary build version                               |
+| `GET`  | `/admin/routes` | JSON array of active route rules, match prefixes, target pools, and policies |
+| `GET`  | `/admin/config` | Runtime snapshot of the active server configuration                          |
+| `POST` | `/admin/reload` | Trigger hot reload of configuration from disk without downtime               |
 
 Example configuration reload trigger:
 
@@ -301,11 +330,11 @@ go test -bench=. -benchtime=2s -benchmem ./internal/...
 
 The following benchmarks were conducted on macOS (Apple M1, 8 cores) running Go 1.26.4:
 
-| Benchmark | Iterations (2s) | Latency | Memory | Allocs | Description |
-|---|---|---|---|---|---|
-| `BenchmarkGatewayChain-8` | 44,428 | 48,402 ns/op | 41,766 B/op | 124 allocs/op | Full chain cache-miss GET through ReverseProxy to live backend |
-| `BenchmarkCacheHit-8` | 8,467,442 | 269.5 ns/op | 48 B/op | 3 allocs/op | Response cache hit path serving directly from memory |
-| `BenchmarkSlidingWindowAllow-8` | 14,011,202 | 167.6 ns/op | 0 B/op | 0 allocs/op | Sliding window Allow() throughput under parallel contention |
+| Benchmark                       | Iterations (2s) | Latency      | Memory      | Allocs        | Description                                                    |
+| ------------------------------- | --------------- | ------------ | ----------- | ------------- | -------------------------------------------------------------- |
+| `BenchmarkGatewayChain-8`       | 44,428          | 48,402 ns/op | 41,766 B/op | 124 allocs/op | Full chain cache-miss GET through ReverseProxy to live backend |
+| `BenchmarkCacheHit-8`           | 8,467,442       | 269.5 ns/op  | 48 B/op     | 3 allocs/op   | Response cache hit path serving directly from memory           |
+| `BenchmarkSlidingWindowAllow-8` | 14,011,202      | 167.6 ns/op  | 0 B/op      | 0 allocs/op   | Sliding window Allow() throughput under parallel contention    |
 
 ### Analysis of Results
 
@@ -323,13 +352,14 @@ The following benchmarks were conducted on macOS (Apple M1, 8 cores) running Go 
 
 ## Project Status
 
-Aegora is built and maintained by Shubham Kashyap. Track ongoing development and planned milestones on [GitHub Issues](https://github.com/syncronix-labs/aegora/issues).
+Aegora is built and maintained by Shubham Kashyap and Meeth Davda. Track ongoing development and planned milestones on [GitHub Issues](https://github.com/syncronix-labs/aegora/issues).
 
 ---
 
 ## Contributing
 
 Pull requests are welcome. Contribution guidelines:
+
 - Run `make verify` (formatting, tidy, lint, tests, build) before submitting changes.
 - Keep pull requests focused: one feature or bugfix per PR.
 - Do not squash-merge; maintain individual commit history with conventional commit messages.
@@ -340,4 +370,3 @@ Pull requests are welcome. Contribution guidelines:
 ## License
 
 Licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
