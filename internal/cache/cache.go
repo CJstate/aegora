@@ -129,9 +129,12 @@ func (c *Cache) Get(key string) (*Entry, bool) {
 	if time.Now().Before(item.entry.ExpiresAt) {
 		// Fast path: the entry is already the most recently used, so no recency
 		// update is needed and the read lock can be released without upgrading.
+		// The entry is loaded before the unlock: a concurrent Put may replace the
+		// field, so reading it after releasing the lock would be a data race.
 		if c.order.Back() == elem {
+			entry := item.entry
 			c.mu.RUnlock()
-			return item.entry, true
+			return entry, true
 		}
 		c.mu.RUnlock()
 		return c.promote(key)
