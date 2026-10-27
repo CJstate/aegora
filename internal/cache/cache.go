@@ -4,6 +4,7 @@ package cache
 
 import (
 	"bytes"
+	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -35,11 +36,26 @@ type Store interface {
 	Put(key string, e *Entry)
 }
 
+// cacheItem is the value stored in the recency list. It keeps the key alongside the
+// entry so evicting a list element can also remove the matching index entry.
+type cacheItem struct {
+	key   string
+	entry *Entry
+}
+
 // Cache implements an in-memory Store with mutex concurrency control,
-// TTL-based lazy expiration, and size-based eviction.
+// TTL-based lazy expiration, and LRU (least recently used) eviction at capacity.
+//
+// Recency is tracked with an intrusive doubly linked list: the front element is the
+// least recently used and therefore the next eviction candidate, the back element is
+// the most recently used. Both reads (Get hits) and writes (Put) move an entry to the
+// back, so a key that keeps being requested survives while cold keys age out. Evicting
+// a hot key is what the previous arbitrary eviction did under capacity pressure, which
+// collapsed the hit ratio.
 type Cache struct {
 	mu           sync.RWMutex
-	entries      map[string]*Entry
+	entries      map[string]*list.Element // key -> element whose Value is a *cacheItem
+	order        *list.List               // front = least recently used, back = most recently used
 	maxEntries   int
 	maxBodyBytes int
 }
@@ -55,69 +71,125 @@ func NewCache(maxEntries, maxBodyBytes int) *Cache {
 	}
 
 	return &Cache{
-		entries:      make(map[string]*Entry),
+		entries:      make(map[string]*list.Element),
+		order:        list.New(),
 		maxEntries:   maxEntries,
 		maxBodyBytes: maxBodyBytes,
 	}
 }
 
+// removeElement unlinks elem from both the recency list and the key index.
+// Callers must hold c.mu for writing.
+func (c *Cache) removeElement(elem *list.Element) {
+	c.order.Remove(elem)
+	delete(c.entries, elem.Value.(*cacheItem).key)
+}
+
+// evict drops the least recently used entry. Callers must hold c.mu for writing.
+func (c *Cache) evict() {
+	if front := c.order.Front(); front != nil {
+		c.removeElement(front)
+	}
+}
+
+// promote marks key as the most recently used entry and returns it.
+// It re-checks freshness under the write lock, since the entry may have expired or been
+// evicted while the caller was upgrading from its read-lock fast path.
+func (c *Cache) promote(key string) (*Entry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	elem, ok := c.entries[key]
+	if !ok {
+		return nil, false
+	}
+	item := elem.Value.(*cacheItem)
+	if !time.Now().Before(item.entry.ExpiresAt) {
+		c.removeElement(elem)
+		return nil, false
+	}
+
+	c.order.MoveToBack(elem)
+	return item.entry, true
+}
+
 // Get retrieves an unexpired entry for key.
+// A successful read counts as a use, so the entry is promoted to the most recently
+// used position; entries that are never read are the ones evicted at capacity.
 // If an entry is present but expired, it is lazily deleted and returns nil, false.
 func (c *Cache) Get(key string) (*Entry, bool) {
 	c.mu.RLock()
-	entry, ok := c.entries[key]
+	elem, ok := c.entries[key]
 	if !ok {
 		c.mu.RUnlock()
 		return nil, false
 	}
 
-	if time.Now().Before(entry.ExpiresAt) {
+	item := elem.Value.(*cacheItem)
+	if time.Now().Before(item.entry.ExpiresAt) {
+		// Fast path: the entry is already the most recently used, so no recency
+		// update is needed and the read lock can be released without upgrading.
+		if c.order.Back() == elem {
+			c.mu.RUnlock()
+			return item.entry, true
+		}
 		c.mu.RUnlock()
-		return entry, true
+		return c.promote(key)
 	}
 	c.mu.RUnlock()
 
 	// Lazily delete expired entry on read.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if entry, ok := c.entries[key]; ok && !time.Now().Before(entry.ExpiresAt) {
-		delete(c.entries, key)
+	if elem, ok := c.entries[key]; ok {
+		if item := elem.Value.(*cacheItem); !time.Now().Before(item.entry.ExpiresAt) {
+			c.removeElement(elem)
+		}
 	}
 	return nil, false
 }
 
 // Put stores an entry as-is under the specified key.
-// If the cache is at capacity (maxEntries) and inserting a new key, an arbitrary entry
-// is evicted (LRU eviction policy is planned for future upgrades).
+// A write counts as a use, so the entry becomes the most recently used.
+// If the cache is at capacity (maxEntries) and inserting a new key, the least recently
+// used entry is evicted.
 func (c *Cache) Put(key string, e *Entry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if _, exists := c.entries[key]; !exists && len(c.entries) >= c.maxEntries {
-		for k := range c.entries {
-			delete(c.entries, k)
-			break
-		}
+	if elem, ok := c.entries[key]; ok {
+		elem.Value.(*cacheItem).entry = e
+		c.order.MoveToBack(elem)
+		return
 	}
 
-	c.entries[key] = e
+	// Make room before inserting so the new key is never the eviction victim.
+	if c.order.Len() >= c.maxEntries {
+		c.evict()
+	}
+
+	c.entries[key] = c.order.PushBack(&cacheItem{key: key, entry: e})
 }
 
 // Invalidate removes a specific entry by key from the cache.
 func (c *Cache) Invalidate(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.entries, key)
+	if elem, ok := c.entries[key]; ok {
+		c.removeElement(elem)
+	}
 }
 
 // InvalidatePrefix scans the cache and removes all entries whose keys begin with prefix.
 func (c *Cache) InvalidatePrefix(prefix string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for k := range c.entries {
-		if strings.HasPrefix(k, prefix) {
-			delete(c.entries, k)
+	for elem := c.order.Front(); elem != nil; {
+		next := elem.Next()
+		if strings.HasPrefix(elem.Value.(*cacheItem).key, prefix) {
+			c.removeElement(elem)
 		}
+		elem = next
 	}
 }
 
