@@ -183,7 +183,7 @@ Two-tier HTTP response caching for GET and HEAD requests.
 | `l2_enabled` | bool | `false` | Yes | Enables distributed L2 cache backed by Redis. |
 | `l2_ttl` | Duration | none (required if l2_enabled) | Yes | Time-to-live for Redis L2 cache entries (for example, `"5m"`). |
 | `redis_addr` | string | `""` | Yes | Host and port for Redis instance (for example, `"redis:6379"`). Required if `l2_enabled` is true. |
-| `max_entries` | int | none (required if enabled) | Yes | Maximum number of entries stored in local L1 memory. |
+| `max_entries` | int | none (required if enabled) | Yes | Maximum number of entries stored in local L1 memory. When the limit is reached, the least recently used entry is evicted. |
 | `max_body_bytes` | int | none (required if enabled) | Yes | Maximum response body size in bytes eligible for caching (for example, `1048576` for 1 MB). |
 
 Cache eligibility rules:
