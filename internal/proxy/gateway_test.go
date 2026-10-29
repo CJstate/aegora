@@ -120,7 +120,7 @@ func TestGateway_RoutingAndForwarding(t *testing.T) {
 			method:         http.MethodGet,
 			path:           "/nonexistent/route",
 			wantStatusCode: http.StatusNotFound,
-			wantBody:       `{"error":"no route matched"}`,
+			wantBody:       `{"error":"no route matched","request_id":"gw-test"}`,
 			expectUpstream: false,
 		},
 		{
@@ -128,7 +128,7 @@ func TestGateway_RoutingAndForwarding(t *testing.T) {
 			method:         http.MethodGet,
 			path:           "/unreachable/test",
 			wantStatusCode: http.StatusBadGateway,
-			wantBody:       `{"error":"bad gateway"}`,
+			wantBody:       `{"error":"bad gateway","request_id":"gw-test"}`,
 			expectUpstream: false,
 		},
 	}
@@ -143,6 +143,11 @@ func TestGateway_RoutingAndForwarding(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, nil)
 			for k, v := range tt.reqHeaders {
 				req.Header.Set(k, v)
+			}
+			if !tt.expectUpstream {
+				// Gateway-generated errors echo the request ID; pin it so the
+				// exact-body assertion stays deterministic.
+				req.Header.Set("X-Request-ID", "gw-test")
 			}
 			rec := httptest.NewRecorder()
 
@@ -254,6 +259,7 @@ func TestGateway_AllUpstreamsUnavailable(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/failover/item", nil)
+	req.Header.Set("X-Request-ID", "gw-test")
 
 	gw.ServeHTTP(rec, req)
 
@@ -261,7 +267,7 @@ func TestGateway_AllUpstreamsUnavailable(t *testing.T) {
 		t.Fatalf("expected 502 Bad Gateway, got %d", rec.Code)
 	}
 
-	if rec.Body.String() != `{"error":"all upstreams unavailable"}` {
+	if rec.Body.String() != `{"error":"all upstreams unavailable","request_id":"gw-test"}` {
 		t.Fatalf("expected 'all upstreams unavailable' error body, got %q", rec.Body.String())
 	}
 
@@ -292,13 +298,14 @@ func TestGateway_UnreachableBackendReportsFailure(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/bad/action", nil)
+	req.Header.Set("X-Request-ID", "gw-test")
 
 	gw.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d", rec.Code)
 	}
-	if rec.Body.String() != `{"error":"bad gateway"}` {
+	if rec.Body.String() != `{"error":"bad gateway","request_id":"gw-test"}` {
 		t.Fatalf("expected 'bad gateway', got %q", rec.Body.String())
 	}
 
@@ -353,12 +360,13 @@ func TestGateway_DoesNotLeakBackendError(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("X-Request-ID", "gw-test")
 
 	gw.ServeHTTP(rec, req)
 
 	body, _ := io.ReadAll(rec.Body)
-	// Must strictly equal `{"error":"bad gateway"}` and never contain dial tcp or connection refused
-	if string(body) != `{"error":"bad gateway"}` {
+	// Must strictly equal the generic body and never contain dial tcp or connection refused
+	if string(body) != `{"error":"bad gateway","request_id":"gw-test"}` {
 		t.Fatalf("leaked backend error details: %s", string(body))
 	}
 }

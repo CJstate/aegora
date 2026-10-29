@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/syncronix-labs/aegora/internal/httperr"
+	"github.com/syncronix-labs/aegora/internal/middleware"
 	"github.com/syncronix-labs/aegora/internal/queue"
 )
 
@@ -228,10 +230,8 @@ func (c *Controller) Admit(next http.Handler) http.Handler {
 
 		roll := rand.Float64()
 		if !c.decide(p, roll) {
-			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Retry-After", "1")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte(`{"error":"server overloaded"}`))
+			httperr.Write(w, http.StatusServiceUnavailable, "server overloaded", middleware.GetRequestID(r))
 			return
 		}
 

@@ -59,6 +59,7 @@ func TestBuildHandler_EndpointsAndMiddleware(t *testing.T) {
 		path         string
 		wantStatus   int
 		wantBody     string
+		wantError    string
 		checkJSONMsg bool
 	}{
 		{
@@ -92,14 +93,14 @@ func TestBuildHandler_EndpointsAndMiddleware(t *testing.T) {
 			method:     http.MethodGet,
 			path:       "/unknown",
 			wantStatus: http.StatusNotFound,
-			wantBody:   `{"error":"no route matched"}`,
+			wantError:  "no route matched",
 		},
 		{
 			name:       "POST /other returns 404 Not Found",
 			method:     http.MethodPost,
 			path:       "/other",
 			wantStatus: http.StatusNotFound,
-			wantBody:   `{"error":"no route matched"}`,
+			wantError:  "no route matched",
 		},
 	}
 
@@ -116,6 +117,9 @@ func TestBuildHandler_EndpointsAndMiddleware(t *testing.T) {
 
 			if tt.wantBody != "" && rec.Body.String() != tt.wantBody {
 				t.Fatalf("body mismatch: got %q, want %q", rec.Body.String(), tt.wantBody)
+			}
+			if tt.wantError != "" {
+				requireJSONError(t, rec, tt.wantError)
 			}
 
 			// Verify that every response carries an X-Request-ID header
@@ -289,9 +293,7 @@ func TestBuildHandler_MaxRequestBody(t *testing.T) {
 		if rec.Code != http.StatusRequestEntityTooLarge {
 			t.Fatalf("expected 413, got %d (body: %s)", rec.Code, rec.Body.String())
 		}
-		if got := rec.Body.String(); got != `{"error":"request body too large"}` {
-			t.Fatalf("unexpected body: %s", got)
-		}
+		requireJSONError(t, rec, "request body too large")
 		if n := hits.Load(); n != 0 {
 			t.Fatalf("expected no upstream hits, got %d", n)
 		}
@@ -319,9 +321,7 @@ func TestBuildHandler_MaxRequestBody(t *testing.T) {
 		if rec.Code != http.StatusRequestEntityTooLarge {
 			t.Fatalf("expected 413, got %d (body: %s)", rec.Code, rec.Body.String())
 		}
-		if got := rec.Body.String(); got != `{"error":"request body too large"}` {
-			t.Fatalf("unexpected body: %s", got)
-		}
+		requireJSONError(t, rec, "request body too large")
 	})
 
 	t.Run("unset limit allows large bodies", func(t *testing.T) {
@@ -675,9 +675,7 @@ func TestBuildHandler_RateLimiting(t *testing.T) {
 	if retryAfter := rec3.Header().Get("Retry-After"); retryAfter == "" {
 		t.Fatalf("expected Retry-After header, got empty")
 	}
-	if body := rec3.Body.String(); body != `{"error":"rate limit exceeded"}` {
-		t.Fatalf("expected body %q, got %q", `{"error":"rate limit exceeded"}`, body)
-	}
+	requireJSONError(t, rec3, "rate limit exceeded")
 
 	// Verify that /livez is never limited, even when client is rate-limited
 	for i := 0; i < 5; i++ {
@@ -1571,5 +1569,23 @@ admin:
 		if !skippedMap[exp] {
 			t.Errorf("expected skipped to contain %q, got: %v", exp, skipped)
 		}
+	}
+}
+
+// requireJSONError asserts that rec carries a gateway-generated error body with a
+// non-empty request_id. Every error Aegora writes itself goes through httperr, so
+// this also pins the body shape those paths share.
+func requireJSONError(t *testing.T, rec *httptest.ResponseRecorder, wantError string) {
+	t.Helper()
+
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("error body is not valid JSON: %v (body: %s)", err, rec.Body.String())
+	}
+	if body["error"] != wantError {
+		t.Fatalf("error = %q, want %q", body["error"], wantError)
+	}
+	if body["request_id"] == "" {
+		t.Fatal("expected a non-empty request_id in the error body")
 	}
 }
