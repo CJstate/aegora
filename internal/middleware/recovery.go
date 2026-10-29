@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+
+	"github.com/syncronix-labs/aegora/internal/httperr"
 )
 
 // Recovery returns a middleware that catches panics occurring in downstream handlers,
@@ -31,9 +33,7 @@ func Recovery(logger *slog.Logger) Middleware {
 						slog.String("stack", stack),
 					)
 
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusInternalServerError)
-					_, _ = w.Write([]byte(`{"error":"internal server error"}`))
+					httperr.Write(w, http.StatusInternalServerError, "internal server error", reqID)
 				}
 			}()
 

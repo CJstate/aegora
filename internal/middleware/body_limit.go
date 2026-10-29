@@ -2,9 +2,9 @@ package middleware
 
 import (
 	"net/http"
-)
 
-const bodyTooLargeJSON = `{"error":"request body too large"}`
+	"github.com/syncronix-labs/aegora/internal/httperr"
+)
 
 // MaxRequestBody returns a middleware that rejects request bodies larger than limit bytes
 // with 413 Request Entity Too Large.
@@ -29,10 +29,8 @@ func MaxRequestBody(limit int64) Middleware {
 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.ContentLength > limit {
-				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Connection", "close")
-				w.WriteHeader(http.StatusRequestEntityTooLarge)
-				_, _ = w.Write([]byte(bodyTooLargeJSON))
+				httperr.Write(w, http.StatusRequestEntityTooLarge, "request body too large", GetRequestID(r))
 				return
 			}
 

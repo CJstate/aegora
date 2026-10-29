@@ -119,7 +119,7 @@ func TestRateLimit_429ResponseHeadersAndBody(t *testing.T) {
 	dummyHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := mw(dummyHandler)
+	handler := RequestID(mw(dummyHandler))
 
 	// First request succeeds
 	rec1 := httptest.NewRecorder()
@@ -163,17 +163,18 @@ func TestRateLimit_429ResponseHeadersAndBody(t *testing.T) {
 		t.Fatalf("expected non-empty positive Retry-After header, got %q", retryAfter)
 	}
 
-	wantBody := `{"error":"rate limit exceeded"}`
-	if rec2.Body.String() != wantBody {
-		t.Fatalf("body mismatch: got %q, want %q", rec2.Body.String(), wantBody)
-	}
-
 	var jsonMap map[string]string
 	if err := json.Unmarshal(rec2.Body.Bytes(), &jsonMap); err != nil {
 		t.Fatalf("response body is not valid JSON: %v", err)
 	}
 	if jsonMap["error"] != "rate limit exceeded" {
 		t.Fatalf("expected JSON error 'rate limit exceeded', got %q", jsonMap["error"])
+	}
+	if jsonMap["request_id"] == "" {
+		t.Fatal("expected request_id in the 429 body")
+	}
+	if want := rec2.Header().Get("X-Request-ID"); jsonMap["request_id"] != want {
+		t.Fatalf("body request_id %q does not match X-Request-ID header %q", jsonMap["request_id"], want)
 	}
 }
 

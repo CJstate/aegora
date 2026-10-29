@@ -1,6 +1,7 @@
 package middleware_test
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -51,8 +52,15 @@ func TestMaxRequestBody_ContentLength(t *testing.T) {
 				if got := rec.Header().Get("Content-Type"); got != "application/json" {
 					t.Errorf("Content-Type = %q, want application/json", got)
 				}
-				if got := rec.Body.String(); got != `{"error":"request body too large"}` {
-					t.Errorf("body = %q, want request body too large JSON", got)
+				var body map[string]string
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("413 body is not valid JSON: %v", err)
+				}
+				if body["error"] != "request body too large" {
+					t.Errorf("error = %q, want request body too large", body["error"])
+				}
+				if _, ok := body["request_id"]; !ok {
+					t.Error("413 body is missing the request_id field")
 				}
 			}
 		})

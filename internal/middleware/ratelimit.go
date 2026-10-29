@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/syncronix-labs/aegora/internal/httperr"
 	"github.com/syncronix-labs/aegora/internal/ratelimit"
 )
 
@@ -179,8 +180,7 @@ func (rl *rateLimiter) serve(w http.ResponseWriter, r *http.Request, next http.H
 		}
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSecs))
 
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":"rate limit exceeded"}`))
+		httperr.Write(w, http.StatusTooManyRequests, "rate limit exceeded", GetRequestID(r))
 		return
 	}
 

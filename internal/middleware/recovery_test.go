@@ -2,6 +2,7 @@ package middleware_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -18,13 +19,13 @@ func TestRecovery_CatchesPanicAndReturns500(t *testing.T) {
 	const panicMsg = "database connection failure simulation"
 	var shouldPanic bool
 
-	handler := middleware.Recovery(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := middleware.RequestID(middleware.Recovery(logger)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if shouldPanic {
 			panic(panicMsg)
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
-	}))
+	})))
 
 	// 1. Panicking request
 	shouldPanic = true
@@ -42,9 +43,18 @@ func TestRecovery_CatchesPanicAndReturns500(t *testing.T) {
 		t.Fatalf("expected Content-Type application/json, got %q", contentType)
 	}
 
-	const expectedBody = `{"error":"internal server error"}`
-	if rec1.Body.String() != expectedBody {
-		t.Fatalf("expected response body %q, got %q", expectedBody, rec1.Body.String())
+	var body map[string]string
+	if err := json.Unmarshal(rec1.Body.Bytes(), &body); err != nil {
+		t.Fatalf("500 body is not valid JSON: %v", err)
+	}
+	if body["error"] != "internal server error" {
+		t.Fatalf("expected error 'internal server error', got %q", body["error"])
+	}
+	if body["request_id"] == "" {
+		t.Fatal("expected request_id in the 500 body")
+	}
+	if want := rec1.Header().Get("X-Request-ID"); body["request_id"] != want {
+		t.Fatalf("body request_id %q does not match X-Request-ID header %q", body["request_id"], want)
 	}
 
 	// Ensure the panic value was NEVER leaked to client

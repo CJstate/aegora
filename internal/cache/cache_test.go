@@ -149,7 +149,7 @@ func TestCache_EvictionAtCapacity(t *testing.T) {
 	}
 	c.mu.Unlock()
 
-	// Inserting 3rd entry triggers eviction of an arbitrary entry
+	// Inserting 3rd entry triggers eviction of the least recently used entry
 	c.Put("key3", e3)
 
 	c.mu.Lock()
