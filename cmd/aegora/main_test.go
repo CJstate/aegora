@@ -59,6 +59,7 @@ func TestBuildHandler_EndpointsAndMiddleware(t *testing.T) {
 		path         string
 		wantStatus   int
 		wantBody     string
+		wantError    string
 		checkJSONMsg bool
 	}{
 		{
@@ -92,14 +93,14 @@ func TestBuildHandler_EndpointsAndMiddleware(t *testing.T) {
 			method:     http.MethodGet,
 			path:       "/unknown",
 			wantStatus: http.StatusNotFound,
-			wantBody:   `{"error":"no route matched"}`,
+			wantError:  "no route matched",
 		},
 		{
 			name:       "POST /other returns 404 Not Found",
 			method:     http.MethodPost,
 			path:       "/other",
 			wantStatus: http.StatusNotFound,
-			wantBody:   `{"error":"no route matched"}`,
+			wantError:  "no route matched",
 		},
 	}
 
@@ -116,6 +117,9 @@ func TestBuildHandler_EndpointsAndMiddleware(t *testing.T) {
 
 			if tt.wantBody != "" && rec.Body.String() != tt.wantBody {
 				t.Fatalf("body mismatch: got %q, want %q", rec.Body.String(), tt.wantBody)
+			}
+			if tt.wantError != "" {
+				requireJSONError(t, rec, tt.wantError)
 			}
 
 			// Verify that every response carries an X-Request-ID header
@@ -289,9 +293,7 @@ func TestBuildHandler_MaxRequestBody(t *testing.T) {
 		if rec.Code != http.StatusRequestEntityTooLarge {
 			t.Fatalf("expected 413, got %d (body: %s)", rec.Code, rec.Body.String())
 		}
-		if got := rec.Body.String(); got != `{"error":"request body too large"}` {
-			t.Fatalf("unexpected body: %s", got)
-		}
+		requireJSONError(t, rec, "request body too large")
 		if n := hits.Load(); n != 0 {
 			t.Fatalf("expected no upstream hits, got %d", n)
 		}
@@ -319,9 +321,7 @@ func TestBuildHandler_MaxRequestBody(t *testing.T) {
 		if rec.Code != http.StatusRequestEntityTooLarge {
 			t.Fatalf("expected 413, got %d (body: %s)", rec.Code, rec.Body.String())
 		}
-		if got := rec.Body.String(); got != `{"error":"request body too large"}` {
-			t.Fatalf("unexpected body: %s", got)
-		}
+		requireJSONError(t, rec, "request body too large")
 	})
 
 	t.Run("unset limit allows large bodies", func(t *testing.T) {
@@ -477,6 +477,128 @@ func TestBuildHandler_AccessLogging(t *testing.T) {
 	}
 }
 
+func TestBuildHandler_RouteRateLimitOverrides(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	intPtr := func(v int) *int { return &v }
+	boolPtr := func(v bool) *bool { return &v }
+
+	newHandler := func(t *testing.T, globalEnabled bool) http.Handler {
+		t.Helper()
+		cfg := newTestConfig()
+		cfg.Routes = []config.RouteConfig{
+			{
+				Name: "login", PathPrefix: "/login", Targets: []string{backend.URL},
+				RateLimit: &config.RouteRateLimitConfig{Enabled: boolPtr(true), MaxRequests: intPtr(2)},
+			},
+			{
+				Name: "internal", PathPrefix: "/internal", Targets: []string{backend.URL},
+				RateLimit: &config.RouteRateLimitConfig{Enabled: boolPtr(false)},
+			},
+			{Name: "web", PathPrefix: "/", Targets: []string{backend.URL}},
+		}
+		cfg.RateLimit = config.RateLimitConfig{
+			Enabled: globalEnabled, Limiter: "sliding_window", MaxRequests: 4,
+			Window: config.Duration(time.Minute), Key: "ip",
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		h, err := buildHandlerWithRegistry(cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)), prometheus.NewRegistry())
+		if err != nil {
+			t.Fatalf("buildHandler: %v", err)
+		}
+		return h
+	}
+
+	do := func(h http.Handler, path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "192.0.2.10:5555"
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("route override has its own stricter limit", func(t *testing.T) {
+		h := newHandler(t, true)
+
+		for i := range 2 {
+			rec := do(h, "/login")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("login %d = %d, want 200", i+1, rec.Code)
+			}
+			if got := rec.Header().Get("X-RateLimit-Limit"); got != "2" {
+				t.Fatalf("login X-RateLimit-Limit = %q, want 2", got)
+			}
+		}
+		if rec := do(h, "/login"); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("login 3 = %d, want 429", rec.Code)
+		}
+
+		// Global bucket is separate and untouched by login traffic.
+		for i := range 4 {
+			rec := do(h, "/home")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("web %d = %d, want 200", i+1, rec.Code)
+			}
+			if got := rec.Header().Get("X-RateLimit-Limit"); got != "4" {
+				t.Fatalf("web X-RateLimit-Limit = %q, want 4", got)
+			}
+		}
+		if rec := do(h, "/home"); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("web 5 = %d, want 429", rec.Code)
+		}
+	})
+
+	t.Run("enabled false opts a route out", func(t *testing.T) {
+		h := newHandler(t, true)
+		for i := range 10 {
+			rec := do(h, "/internal/status")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("internal %d = %d, want 200", i+1, rec.Code)
+			}
+			if got := rec.Header().Get("X-RateLimit-Limit"); got != "" {
+				t.Fatalf("internal route should not be rate limited, got X-RateLimit-Limit %q", got)
+			}
+		}
+	})
+
+	t.Run("route can enable limiting while global is off", func(t *testing.T) {
+		h := newHandler(t, false)
+		for range 2 {
+			do(h, "/login")
+		}
+		if rec := do(h, "/login"); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("login 3 = %d, want 429", rec.Code)
+		}
+		for i := range 10 {
+			if rec := do(h, "/home"); rec.Code != http.StatusOK {
+				t.Fatalf("web %d = %d, want 200 (global limiting disabled)", i+1, rec.Code)
+			}
+		}
+	})
+
+	// Documents a known limitation: routing matches the percent-encoded path, so
+	// "/%6Cogin" does not match the /login route and gets the catch-all route's limit.
+	// A backend that decodes paths would still see /login. Tracked as a follow-up.
+	t.Run("percent-encoded path falls through to catch-all limit", func(t *testing.T) {
+		h := newHandler(t, true)
+		for range 2 {
+			do(h, "/login")
+		}
+		rec := do(h, "/%6Cogin")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("encoded login = %d, want 200 (catch-all limit applies)", rec.Code)
+		}
+		if got := rec.Header().Get("X-RateLimit-Limit"); got != "4" {
+			t.Fatalf("encoded login X-RateLimit-Limit = %q, want 4 (catch-all route)", got)
+		}
+	})
+}
+
 func TestBuildHandler_RateLimiting(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -553,9 +675,7 @@ func TestBuildHandler_RateLimiting(t *testing.T) {
 	if retryAfter := rec3.Header().Get("Retry-After"); retryAfter == "" {
 		t.Fatalf("expected Retry-After header, got empty")
 	}
-	if body := rec3.Body.String(); body != `{"error":"rate limit exceeded"}` {
-		t.Fatalf("expected body %q, got %q", `{"error":"rate limit exceeded"}`, body)
-	}
+	requireJSONError(t, rec3, "rate limit exceeded")
 
 	// Verify that /livez is never limited, even when client is rate-limited
 	for i := 0; i < 5; i++ {
@@ -1449,5 +1569,23 @@ admin:
 		if !skippedMap[exp] {
 			t.Errorf("expected skipped to contain %q, got: %v", exp, skipped)
 		}
+	}
+}
+
+// requireJSONError asserts that rec carries a gateway-generated error body with a
+// non-empty request_id. Every error Aegora writes itself goes through httperr, so
+// this also pins the body shape those paths share.
+func requireJSONError(t *testing.T, rec *httptest.ResponseRecorder, wantError string) {
+	t.Helper()
+
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("error body is not valid JSON: %v (body: %s)", err, rec.Body.String())
+	}
+	if body["error"] != wantError {
+		t.Fatalf("error = %q, want %q", body["error"], wantError)
+	}
+	if body["request_id"] == "" {
+		t.Fatal("expected a non-empty request_id in the error body")
 	}
 }

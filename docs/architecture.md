@@ -30,7 +30,7 @@ Applies an AIMD (Additive Increase / Multiplicative Decrease) control loop that 
 Enforces client-level request limits using sliding-window timestamp logs or token bucket refill rates, partitioned by remote IP address or API key. Requests exceeding quotas are rejected with 429 Too Many Requests and a `Retry-After` header. It sits before response caching and queueing to enforce quotas uniformly, regardless of whether a response will be served from cache or upstream.
 
 ### 8. Response Cache
-Evaluates cache eligibility for GET and HEAD requests. On a cache hit, it inspects `If-None-Match` to serve 304 Not Modified when ETags match, or directly returns cached headers and body with `X-Cache: HIT`. Cache hits bypass the admission queue and upstream reverse proxy entirely. On a cache miss, it wraps the writer to capture eligible 200 responses for storage in L1 memory and L2 Redis.
+Evaluates cache eligibility for GET and HEAD requests. On a cache hit, it inspects `If-None-Match` to serve 304 Not Modified when ETags match, or directly returns cached headers and body with `X-Cache: HIT`. Cache hits bypass the admission queue and upstream reverse proxy entirely. On a cache miss, it wraps the writer to capture eligible 200 responses for storage in L1 memory and L2 Redis. Concurrent misses for the same key are coalesced so that only one of them reaches the upstream.
 
 ### 9. Admission Queue
 Enforces strict concurrency limits (`max_inflight`) and queue depth bounds (`max_queue_depth`) fronting upstream connections. It classifies requests into priority buckets (high, normal, low) and applies CoDel (Controlled Delay) drop logic to discard requests whose queue dwell times exceed latency targets. This protects upstream connection pools from connection stampedes and bufferbloat.
@@ -57,6 +57,18 @@ Configuration hot reloading via `POST /admin/reload` creates an entirely new HTT
 ### Multi-Tier Cache with Write-Through and Backfill
 The caching subsystem implements a Store interface with a two-tier strategy. Reads first query local L1 memory. On an L1 miss, the store checks L2 Redis. If present in Redis, the entry is returned and backfilled into local L1 memory for future requests. Writes execute as a write-through operation, updating both L1 memory and L2 Redis simultaneously. If Redis is temporarily unreachable, the gateway degrades gracefully to standalone L1 operation.
 
+### LRU Eviction at Capacity
+The L1 store is bounded by `max_entries`. When it is full, the entry evicted is the least recently used one, not an arbitrary one. Recency lives in a doubly linked list ordered from least to most recently used, and the key index maps each key to its list node, so promotion and eviction are both O(1) pointer updates rather than a scan.
+
+Both reads and writes count as a use. A `Get` hit moves its entry to the most recently used end, and a `Put` on an existing key does the same, so a key that keeps being requested survives capacity pressure while keys that were stored once and never read age out first. This matters for a gateway specifically: request traffic is heavy-tailed, and arbitrary eviction reliably discards the small hot set that produces most cache hits, collapsing the hit ratio exactly when the gateway is under enough load to fill the cache. Least-frequently-used was rejected because its per-entry counters cost more bookkeeping than the gain recency already delivers on this traffic shape.
+
+The hot path stays cheap. A hit on the most recently used entry returns under the read lock without touching the list, since it is already in the promoted position. Every other hit briefly upgrades to the write lock to relink one node. The upgrade re-checks the entry, so an entry that expired or was evicted in between is reported as a miss instead of being resurrected by the promotion.
+
+### Request Coalescing on Cache Miss
+When many requests for the same uncached key arrive at once (a cache stampede, or "thundering herd"), every one of them would otherwise miss and hit the upstream, multiplying load on a backend that may already be recovering. The cache middleware collapses concurrent misses per key with `golang.org/x/sync/singleflight`: the first request (the leader) calls the upstream, and requests arriving while it is in flight (followers) wait and are served the leader's response from the resulting cache entry, including `If-None-Match` evaluation.
+
+Only cache-eligible responses are shared. If the leader's response is not stored (non-200, `Set-Cookie`, `no-store`, or larger than `max_body_bytes`), or the leader panics, each follower calls the upstream itself and observes its own outcome, so failures are never fanned out to other clients. The trade-off is that coalescing protects the upstream while it returns successful responses; during an error burst, followers retry independently. Requests carrying `Cache-Control: no-store` skip coalescing because they are never cached.
+
 ### W3C Trace Context Propagation
 Aegora wraps its shared HTTP base transport with `otelhttp.NewTransport`. As requests pass through Go's `httputil.ReverseProxy`, the active trace context stored within the request's `context.Context` is automatically injected into outgoing HTTP request headers as `traceparent` and `tracestate`. This enables end-to-end distributed tracing across microservices with zero manual header injection in the proxy loop.
 
@@ -82,7 +94,7 @@ Aegora is designed to handle high concurrency with minimal lock contention on cr
 
 ### Mutex-Guarded State
 - **Rate Limiters (`internal/ratelimit`)**: `SlidingWindow` uses a `sync.Mutex` to guard its slice of timestamps during prune and append operations. The in-memory limiter registry uses a `sync.RWMutex` to guard the map of active per-key limiters.
-- **Cache Store (`internal/cache`)**: `Cache` uses a `sync.RWMutex` protecting its map of entries. Cache hits acquire a read lock (`RLock`), allowing high-throughput concurrent reads. Write-through puts, invalidations, and capacity evictions acquire an exclusive write lock (`Lock`).
+- **Cache Store (`internal/cache`)**: `Cache` uses a `sync.RWMutex` protecting both its key index and its recency list. A hit on the most recently used entry releases the read lock (`RLock`) and returns immediately, so the hottest key never contends for the write lock. Any other hit upgrades to an exclusive lock (`Lock`) to promote the entry to the back of the list, because recency tracking is a mutation. Write-through puts, invalidations, and capacity evictions also take the write lock. The upgrade re-validates freshness, so an entry that expired or was evicted between the two phases is reported as a miss rather than resurrected.
 - **Circuit Breakers (`internal/reliability`)**: Each circuit breaker instance protects its state transitions (closed, open, half-open), probe counts, and failure counters with a `sync.Mutex`.
 - **Admission Queue (`internal/queue`)**: The priority queue uses a `sync.Mutex` to synchronize heap operations across priority buckets, inflight request counters, and CoDel tracking timestamps.
 - **Target Pools (`internal/proxy`)**: Target selection pools use a `sync.Mutex` to update target health state and increment round-robin or least-connection counters.

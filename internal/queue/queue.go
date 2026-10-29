@@ -6,6 +6,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/syncronix-labs/aegora/internal/httperr"
+	"github.com/syncronix-labs/aegora/internal/middleware"
 )
 
 // Priority represents the traffic classification tier for incoming requests.
@@ -184,7 +187,7 @@ func (q *Queue) Admit(next http.Handler) http.Handler {
 		q.mu.Lock()
 		if !q.running {
 			q.mu.Unlock()
-			writeOverloadedJSON(w)
+			writeOverloadedJSON(w, r)
 			return
 		}
 
@@ -201,7 +204,7 @@ func (q *Queue) Admit(next http.Handler) http.Handler {
 
 		if queueLen >= q.maxDepth {
 			q.mu.Unlock()
-			writeOverloadedJSON(w)
+			writeOverloadedJSON(w, r)
 			return
 		}
 
@@ -226,7 +229,7 @@ func (q *Queue) Admit(next http.Handler) http.Handler {
 		select {
 		case res := <-t.done:
 			if res == resultDropped {
-				writeOverloadedJSON(w)
+				writeOverloadedJSON(w, r)
 				return
 			}
 
@@ -399,8 +402,6 @@ func (q *Queue) dispatchLoop() {
 	}
 }
 
-func writeOverloadedJSON(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusServiceUnavailable)
-	_, _ = w.Write([]byte(`{"error":"server overloaded"}`))
+func writeOverloadedJSON(w http.ResponseWriter, r *http.Request) {
+	httperr.Write(w, http.StatusServiceUnavailable, "server overloaded", middleware.GetRequestID(r))
 }
