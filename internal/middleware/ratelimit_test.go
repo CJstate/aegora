@@ -119,7 +119,7 @@ func TestRateLimit_429ResponseHeadersAndBody(t *testing.T) {
 	dummyHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := mw(dummyHandler)
+	handler := RequestID(mw(dummyHandler))
 
 	// First request succeeds
 	rec1 := httptest.NewRecorder()
@@ -163,17 +163,18 @@ func TestRateLimit_429ResponseHeadersAndBody(t *testing.T) {
 		t.Fatalf("expected non-empty positive Retry-After header, got %q", retryAfter)
 	}
 
-	wantBody := `{"error":"rate limit exceeded"}`
-	if rec2.Body.String() != wantBody {
-		t.Fatalf("body mismatch: got %q, want %q", rec2.Body.String(), wantBody)
-	}
-
 	var jsonMap map[string]string
 	if err := json.Unmarshal(rec2.Body.Bytes(), &jsonMap); err != nil {
 		t.Fatalf("response body is not valid JSON: %v", err)
 	}
 	if jsonMap["error"] != "rate limit exceeded" {
 		t.Fatalf("expected JSON error 'rate limit exceeded', got %q", jsonMap["error"])
+	}
+	if jsonMap["request_id"] == "" {
+		t.Fatal("expected request_id in the 429 body")
+	}
+	if want := rec2.Header().Get("X-Request-ID"); jsonMap["request_id"] != want {
+		t.Fatalf("body request_id %q does not match X-Request-ID header %q", jsonMap["request_id"], want)
 	}
 }
 
@@ -264,5 +265,79 @@ func TestRateLimit_EvictionWithSmallCap(t *testing.T) {
 	// Idle keys 1 and 2 should have been swept, leaving key 3 (len <= maxKeys)
 	if countAfter > 2 {
 		t.Fatalf("expected registry size <= 2 after eviction, got %d", countAfter)
+	}
+}
+
+func TestRouteRateLimit_Dispatch(t *testing.T) {
+	limitTo := func(n int) Middleware {
+		return RateLimit(func() ratelimit.Limiter { return ratelimit.NewSlidingWindow(time.Minute, n) }, IPKey, nil)
+	}
+
+	// Stand-in for the gateway router: maps exact paths to route names.
+	match := func(r *http.Request) string {
+		switch r.URL.Path {
+		case "/login":
+			return "login"
+		case "/internal":
+			return "internal"
+		case "/unmatched":
+			return ""
+		default:
+			return "api"
+		}
+	}
+
+	handler := RouteRateLimit(match, map[string]Middleware{
+		"login":    limitTo(1),
+		"internal": nil, // explicitly unlimited
+	}, limitTo(3))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	do := func(path string) int {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "192.0.2.1:1234"
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// login: own bucket with limit 1
+	if got := do("/login"); got != http.StatusOK {
+		t.Fatalf("login #1 = %d, want 200", got)
+	}
+	if got := do("/login"); got != http.StatusTooManyRequests {
+		t.Fatalf("login #2 = %d, want 429", got)
+	}
+
+	// api and unmatched share the fallback bucket (limit 3); login usage did not count.
+	for i, path := range []string{"/api", "/unmatched", "/api"} {
+		if got := do(path); got != http.StatusOK {
+			t.Fatalf("fallback request %d (%s) = %d, want 200", i+1, path, got)
+		}
+	}
+	if got := do("/api"); got != http.StatusTooManyRequests {
+		t.Fatalf("fallback request 4 = %d, want 429", got)
+	}
+
+	// internal: nil entry means no limiting
+	for i := range 10 {
+		if got := do("/internal"); got != http.StatusOK {
+			t.Fatalf("internal request %d = %d, want 200", i+1, got)
+		}
+	}
+}
+
+func TestRouteRateLimit_NilFallbackPassesThrough(t *testing.T) {
+	handler := RouteRateLimit(func(*http.Request) string { return "" }, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for i := range 5 {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d = %d, want 200", i+1, rec.Code)
+		}
 	}
 }

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/syncronix-labs/aegora/internal/httperr"
+	"github.com/syncronix-labs/aegora/internal/middleware"
 	"github.com/syncronix-labs/aegora/internal/reliability"
 )
 
@@ -129,14 +131,14 @@ func NewGateway(routes []RouteConfig, rc ReliabilityConfig) (*Gateway, error) {
 			},
 			func(w http.ResponseWriter, req *http.Request, err error) {
 				if errors.Is(err, reliability.ErrCircuitOpen) {
-					writeJSONError(w, http.StatusServiceUnavailable, `{"error":"service unavailable"}`)
+					httperr.Write(w, http.StatusServiceUnavailable, "service unavailable", middleware.GetRequestID(req))
 					return
 				}
 				// A chunked body that exceeded server.max_request_body_bytes mid-stream is a
 				// client fault: answer 413 and leave the upstream's passive health untouched.
 				var maxBytesErr *http.MaxBytesError
 				if errors.As(err, &maxBytesErr) {
-					writeJSONError(w, http.StatusRequestEntityTooLarge, `{"error":"request body too large"}`)
+					httperr.Write(w, http.StatusRequestEntityTooLarge, "request body too large", middleware.GetRequestID(req))
 					return
 				}
 				if info, ok := req.Context().Value(upstreamContextKey).(*upstreamInfo); ok && info != nil {
@@ -144,7 +146,7 @@ func NewGateway(routes []RouteConfig, rc ReliabilityConfig) (*Gateway, error) {
 						info.pool.ReportFailure(info.index)
 					}
 				}
-				writeJSONError(w, http.StatusBadGateway, `{"error":"bad gateway"}`)
+				httperr.Write(w, http.StatusBadGateway, "bad gateway", middleware.GetRequestID(req))
 			},
 		)
 		proxy.Transport = routeTransport
@@ -175,19 +177,19 @@ func (g *Gateway) Router() *Router {
 // selects an upstream target, and proxies the request.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if g == nil || g.router == nil {
-		writeJSONError(w, http.StatusNotFound, `{"error":"no route matched"}`)
+		httperr.Write(w, http.StatusNotFound, "no route matched", middleware.GetRequestID(req))
 		return
 	}
 
 	route := g.router.Match(req)
 	if route == nil {
-		writeJSONError(w, http.StatusNotFound, `{"error":"no route matched"}`)
+		httperr.Write(w, http.StatusNotFound, "no route matched", middleware.GetRequestID(req))
 		return
 	}
 
 	entry := g.routes[route]
 	if entry == nil {
-		writeJSONError(w, http.StatusNotFound, `{"error":"no route matched"}`)
+		httperr.Write(w, http.StatusNotFound, "no route matched", middleware.GetRequestID(req))
 		return
 	}
 
@@ -204,7 +206,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	targetURL, idx, ok := entry.pool.Next()
 	if !ok {
-		writeJSONError(w, http.StatusBadGateway, `{"error":"all upstreams unavailable"}`)
+		httperr.Write(w, http.StatusBadGateway, "all upstreams unavailable", middleware.GetRequestID(req))
 		return
 	}
 	defer entry.pool.Done(idx)
@@ -226,12 +228,6 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	outReq.Host = targetURL.Host
 
 	entry.proxy.ServeHTTP(w, outReq)
-}
-
-func writeJSONError(w http.ResponseWriter, statusCode int, jsonBody string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	_, _ = w.Write([]byte(jsonBody))
 }
 
 func singleJoiningSlash(a, b string) string {
